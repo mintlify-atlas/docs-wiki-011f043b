@@ -171,7 +171,7 @@ The platform tracks password history to prevent reuse. `AppUserPreviousPassword`
 ### Force-reset and expiry
 
 `AppUser` fields:
-- `mustChangePasswordOnFirstLogin` — forces a password change before any API call proceeds.
+- `firstTimeLoginRemaining` — forces a password change before any API call proceeds (column: `firsttime_login_remaining`).
 - `credentialsNonExpired` — set to `false` when the password expires; the user is redirected to the change-password endpoint.
 - `failedLoginAttempts` — incremented on each bad password; `loginRetryLimitEnabled` controls whether the account locks after a threshold.
 
@@ -213,12 +213,11 @@ This is the lookup called by `TenantAwareJpaPlatformUserDetailsService` during a
 `AppUser` implements `org.apache.fineract.infrastructure.security.domain.PlatformUser`, which extends `org.springframework.security.core.userdetails.UserDetails`. The authority list is built from permissions:
 
 ```java
-// In AppUser.getAuthorities():
-for (Role role : this.roles) {
-    if (!role.isDisabled()) {
-        for (Permission permission : role.getPermissions()) {
-            authorities.add(new SimpleGrantedAuthority(permission.getCode()));
-        }
+// In AppUser.populateGrantedAuthorities():
+for (final Role role : this.roles) {
+    final Collection<Permission> permissions = role.getPermissions();
+    for (final Permission permission : permissions) {
+        grantedAuthorities.add(new SimpleGrantedAuthority(permission.getCode()));
     }
 }
 ```

@@ -1,11 +1,11 @@
 ---
 title: "Gradle Multi-Module Build System"
 sidebarTitle: "Build System"
-description: "Fineract is a 30-module Gradle monorepo with Develocity build scans, local build cache, custom extension support, and Lombok-based compilation."
+description: "Fineract is a 37-module Gradle monorepo with Develocity build scans, local build cache, custom extension support, and Lombok-based compilation."
 ---
 
 Apache Fineract uses a Gradle multi-module monorepo managed by `settings.gradle`.
-The build root aggregates 30 declared modules ranging from core infrastructure to
+The build root aggregates 37 declared modules ranging from core infrastructure to
 domain-specific modules, test suites, and the client SDK. The build system is
 configured for fast incremental builds via Develocity build scans and a local
 build cache.
@@ -57,6 +57,12 @@ include ':fineract-client'
 include ':fineract-client-feign'
 include ':fineract-doc'
 include ':fineract-avro-schemas'
+include ':fineract-e2e-tests-core'
+include ':fineract-e2e-tests-runner'
+include 'fineract-progressive-loan'
+include 'fineract-progressive-loan-embeddable-schedule-generator'
+include 'fineract-working-capital-loan'
+include ':custom:docker'
 ```
 
 ### Module Categories
@@ -87,6 +93,11 @@ Apache Nexus during release.
 | `integration-tests` | Full API integration tests against a running instance |
 | `twofactor-tests` | 2FA-specific integration tests |
 | `oauth2-tests` | OAuth2 integration tests |
+| `fineract-progressive-loan` | Progressive loan repayment schedule engine |
+| `fineract-progressive-loan-embeddable-schedule-generator` | Embeddable schedule generator for progressive loans |
+| `fineract-working-capital-loan` | Working capital loan domain |
+| `fineract-e2e-tests-core` | End-to-end test framework core |
+| `fineract-e2e-tests-runner` | End-to-end test runner |
 
 ## Build Tooling
 

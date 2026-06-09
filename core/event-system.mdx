@@ -121,7 +121,7 @@ flowchart LR
     BN -->|if enabled| EES[ExternalEventService]
     EES -->|serialize to Avro| BES[BusinessEventSerializer]
     BES -->|toAvroDTO| DTO[ByteBufferSerializable Avro DTO]
-    EES -->|persist| DB[(m_external_event\nstatus=SENT/TO_BE_SENT)]
+    EES -->|persist| DB[(m_external_event\nstatus=TO_BE_SENT)]
     DB -->|SendAsynchronousEventsTasklet\npolls batch job| EP[ExternalEventProducer]
     EP -->|Kafka| K[Apache Kafka]
     EP -->|JMS| J[ActiveMQ]
@@ -174,7 +174,7 @@ public class ExternalEvent extends AbstractPersistableCustom<Long> {
     String schema;      // fully qualified Avro class name
     byte[] data;        // Avro-serialized payload
     OffsetDateTime createdAt;
-    ExternalEventStatus status;  // TO_BE_SENT, SENT, FAILED
+    ExternalEventStatus status;  // TO_BE_SENT, SENT
     String idempotencyKey;
     Long aggregateRootId;
 }

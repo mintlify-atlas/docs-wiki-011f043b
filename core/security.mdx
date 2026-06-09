@@ -53,7 +53,6 @@ fineract-security/src/main/java/org/apache/fineract/infrastructure/security/
 │   └── BusinessDateFilter.java
 └── service/
     ├── AuthTenantDetailsService.java / ...Jdbc.java
-    ├── FineractJwtAuthenticationTokenConverter.java
     ├── RandomOTPGenerator.java
     ├── SpringSecurityPlatformSecurityContext.java
     ├── SqlInjectionPreventerServiceImpl.java
@@ -120,23 +119,23 @@ Activated when `fineract.security.2fa.enabled=true`. Runs after the primary auth
 1. Only acts when `authentication.getPrincipal() instanceof AppUser` — i.e. the user is already authenticated.
 2. Reads the `Fineract-Platform-TFA-Token` header.
 3. If the user has the `BYPASS_TWOFACTOR` permission, unconditionally grants `TWOFACTOR_AUTHENTICATED` authority.
-4. Otherwise validates the token via `TwoFactorService.validateTwoFactorAccessToken(user, token)`. If valid, adds `TWOFACTOR_AUTHENTICATED` to the authentication's authority list.
-5. If the token is missing or invalid, returns HTTP 403.
+4. Otherwise reads the `Fineract-Platform-TFA-Token` header. If the token is present but invalid (non-existent or expired), returns HTTP 401. If the token is absent, the filter passes the request through without adding the authority (downstream resources can enforce its presence).
+5. If the token is valid, adds `TWOFACTOR_AUTHENTICATED` to the authentication's authority list.
 
 ```java
 // TwoFactorAuthenticationFilter — authority added on success:
-new SimpleGrantedAuthority(TwoFactorConstants.TWOFACTOR_AUTHENTICATED_AUTHORITY)
+new SimpleGrantedAuthority("TWOFACTOR_AUTHENTICATED")
 ```
 
 ## JWT Authentication
 
 ### `FineractJwtAuthenticationToken`
 
-A Spring Security `AbstractAuthenticationToken` subclass that carries both the decoded `Jwt` and the resolved `UserDetails` (`AppUser`):
+A Spring Security `JwtAuthenticationToken` subclass that carries both the decoded `Jwt` and the resolved `UserDetails` (`AppUser`):
 
 ```java
-public class FineractJwtAuthenticationToken extends AbstractOAuth2TokenAuthenticationToken<Jwt> {
-    // holds Jwt + UserDetails; used as principal throughout the app
+public class FineractJwtAuthenticationToken extends JwtAuthenticationToken {
+    // holds Jwt + UserDetails; getPrincipal() returns the resolved AppUser
 }
 ```
 

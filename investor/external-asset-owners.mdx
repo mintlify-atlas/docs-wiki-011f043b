@@ -61,9 +61,11 @@ public class ExternalAssetOwnerTransfer extends AbstractAuditableWithUTCDateTime
     @Column(name = "external_id", length = 100, nullable = false)
     private ExternalId externalId;
 
+    @Column(name = "status", length = 50, nullable = false)
     @Enumerated(EnumType.STRING)
     private ExternalTransferStatus status;
 
+    @Column(name = "sub_status", length = 50)
     @Enumerated(EnumType.STRING)
     private ExternalTransferSubStatus subStatus;
 
@@ -86,6 +88,13 @@ public class ExternalAssetOwnerTransfer extends AbstractAuditableWithUTCDateTime
 
     @Column(name = "external_loan_id", length = 100)
     private ExternalId externalLoanId;
+
+    @Column(name = "external_group_id", length = 100)
+    private ExternalId externalGroupId;
+
+    @ManyToOne
+    @JoinColumn(name = "previous_owner_id")
+    private ExternalAssetOwner previousOwner;
 }
 ```
 

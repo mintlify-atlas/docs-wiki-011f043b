@@ -51,7 +51,8 @@ Defines `AbstractPersistableCustom<T>` — the JPA base entity that all Fineract
 
 ```java
 // All JPA entities extend this:
-public abstract class AbstractPersistableCustom<ID extends Serializable> { ... }
+public abstract class AbstractPersistableCustom<T extends Serializable>
+    implements Persistable<T>, Serializable { ... }
 ```
 
 `FineractPlatformTenant` holds the per-tenant datasource coordinates that `TenantAwareBasicAuthenticationFilter` loads and stores via `ThreadLocalContextUtil`.

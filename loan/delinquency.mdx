@@ -219,7 +219,7 @@ flowchart TD
     B --> C[Fetch loans with CHARGEBACK transactions ≤ businessDate]
     C --> D[Fetch loans with overdue installments]
     D --> E{For each loan}
-    E --> F[DelinquencyEffectivePauseHelper\n.getEffectivePauseWindow]
+    E --> F[DelinquencyEffectivePauseHelper\n.calculateEffectiveDelinquencyList]
     F --> G{Pause active?}
     G -- Yes --> H[Skip tagging / remove tag if paused]
     G -- No --> I[Calculate overdue days\n = businessDate - earliest overdue installment due date]

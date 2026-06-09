@@ -170,6 +170,12 @@ containers:
         value: fineractmysql
       - name: FINERACT_DEFAULT_TENANTDB_PORT
         value: '3306'
+      - name: FINERACT_DEFAULT_TENANTDB_UID
+        valueFrom: { secretKeyRef: { name: fineract-tenants-db-secret, key: username } }
+      - name: FINERACT_DEFAULT_TENANTDB_PWD
+        valueFrom: { secretKeyRef: { name: fineract-tenants-db-secret, key: password } }
+      - name: FINERACT_DEFAULT_TENANTDB_CONN_PARAMS
+        value: ''
       - name: FINERACT_SERVER_PORT
         value: "8443"
       - name: JAVA_TOOL_OPTIONS

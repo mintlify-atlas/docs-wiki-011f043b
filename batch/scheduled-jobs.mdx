@@ -80,7 +80,7 @@ public class ScheduledJobRunHistory extends AbstractPersistableCustom<Long> {
 
     @Column(name = "status")
     private String status;     // "success" | "failed" | "..."
-    // trigger_type, error_message, error_log, run_as_nonscheduled_task, ...
+    // trigger_type, error_message, error_log, ...
 }
 ```
 
@@ -191,7 +191,7 @@ After a job has been "running" for more than `stuck-retry-threshold` minutes wit
 The `node_id` column on `ScheduledJobDetail` controls which cluster node owns a given job. When `isMismatchedJob = true` (the row's `node_id` differs from the current node's configured `fineract.nodeId`), the node skips triggering that job even if its cron fires. This provides basic affinity without a distributed lock.
 
 ```properties
-fineract.nodeId=1   # Set per-node; used to filter ScheduledJobDetail rows
+fineract.node-id=1   # Set per-node; used to filter ScheduledJobDetail rows
 ```
 
 ---

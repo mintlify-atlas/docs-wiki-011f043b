@@ -83,10 +83,10 @@ public class SavingsAccount extends AbstractAuditableWithUTCDateTimeCustom<Long>
 
 | Column | Java field | Purpose |
 |---|---|---|
-| `account_no` | `accountNo` | Human-readable account number (unique) |
+| `account_no` | `accountNumber` | Human-readable account number (unique) |
 | `external_id` | `externalId` | Caller-supplied external reference |
 | `status_enum` | `status` | Integer FK into `SavingsAccountStatusType` |
-| `sub_status_enum` | `subStatus` | Dormancy sub-state |
+| `sub_status_enum` | `sub_status` | Dormancy sub-state |
 | `nominal_annual_interest_rate` | `nominalAnnualInterestRate` | Base rate (`BigDecimal`) |
 | `interest_compounding_period_enum` | `interestCompoundingPeriodType` | Compounding frequency |
 | `interest_posting_period_enum` | `interestPostingPeriodType` | Posting frequency |
@@ -94,14 +94,14 @@ public class SavingsAccount extends AbstractAuditableWithUTCDateTimeCustom<Long>
 | `interest_calculation_days_in_year_type_enum` | `interestCalculationDaysInYearType` | 360 or 365 |
 | `allow_overdraft` | `allowOverdraft` | Whether negative balance is permitted |
 | `overdraft_limit` | `overdraftLimit` | Maximum overdraft amount |
-| `nominal_annual_interest_rate_overdraft` | – | Separate overdraft interest rate |
+| `nominal_annual_interest_rate_overdraft` | `nominalAnnualInterestRateOverdraft` | Separate overdraft interest rate |
 | `enforce_min_required_balance` | `enforceMinRequiredBalance` | Whether minimum balance is enforced |
 | `min_required_balance` | `minRequiredBalance` | Hard floor balance |
 | `is_lien_allowed` / `max_allowed_lien_limit` | `lienAllowed` / `maxAllowedLienLimit` | Lien/hold configuration |
 | `on_hold_funds_derived` | `onHoldFunds` | Running total of funds placed on hold |
-| `lockin_period_frequency` / `lockin_period_frequency_enum` | – | Lock-in period for withdrawals |
+| `lockin_period_frequency` / `lockin_period_frequency_enum` | `lockinPeriodFrequency` / `lockinPeriodFrequencyType` | Lock-in period for withdrawals |
 | `deposit_type_enum` | `depositType` | Read-only discriminator mirror |
-| `min_balance_for_interest_calculation` | – | Minimum balance threshold for interest eligibility |
+| `min_balance_for_interest_calculation` | `minBalanceForInterestCalculation` | Minimum balance threshold for interest eligibility |
 
 <Note>
 `status_enum` stores integer codes from `SavingsAccountStatusType` (e.g. `300` = ACTIVE). Always call `SavingsAccountStatusType.fromInt(account.getStatus())` rather than comparing raw integers.
@@ -111,7 +111,7 @@ public class SavingsAccount extends AbstractAuditableWithUTCDateTimeCustom<Long>
 
 ## Account lifecycle
 
-The full set of states is defined in `fineract-core/.../savings/domain/SavingsAccountStatusType.java`:
+The full set of states is defined in `fineract-core/.../portfolio/savings/domain/SavingsAccountStatusType.java`:
 
 ```java
 public enum SavingsAccountStatusType {
@@ -154,7 +154,7 @@ The `WITHDRAWN_BY_APPLICANT` (400) and `REJECTED` (500) states are terminal. The
 
 ## Transaction types
 
-Defined in `fineract-core/.../savings/SavingsAccountTransactionType.java`. Each variant carries an optional `TransactionEntryType` that drives the double-entry direction:
+Defined in `fineract-core/.../portfolio/savings/SavingsAccountTransactionType.java`. Each variant carries an optional `TransactionEntryType` that drives the double-entry direction:
 
 | Enum value | ID | Entry type | Description |
 |---|---|---|---|
@@ -167,6 +167,11 @@ Defined in `fineract-core/.../savings/SavingsAccountTransactionType.java`. Each 
 | `PAY_CHARGE` | 7 | DEBIT | General charge payment |
 | `DIVIDEND_PAYOUT` | 8 | CREDIT | Dividend from share product |
 | `ACCRUAL` | 10 | — | Accrual marker (no posting) |
+| `INITIATE_TRANSFER` | 12 | — | Account transfer initiation marker |
+| `APPROVE_TRANSFER` | 13 | — | Account transfer approval marker |
+| `WITHDRAW_TRANSFER` | 14 | — | Account transfer withdrawal marker |
+| `REJECT_TRANSFER` | 15 | — | Account transfer rejection marker |
+| `WRITTEN_OFF` | 16 | — | Write-off marker |
 | `OVERDRAFT_INTEREST` | 17 | DEBIT | Overdraft interest charge |
 | `WITHHOLD_TAX` | 18 | DEBIT | Tax withheld at source |
 | `ESCHEAT` | 19 | DEBIT | Transfer to dormancy/escheat |
@@ -225,7 +230,7 @@ public class InterestRateChartSlab extends AbstractPersistableCustom<Long> {
 When `isPrimaryGroupingByAmount` is false (the default), slabs are selected based on tenure; when true, the principal amount is the primary axis. Each slab can carry `InterestIncentives` — adjustments applied for specific client attributes (e.g. gender, age group), assembled via `AttributeIncentiveCalculationFactory`.
 
 <Tip>
-To trace which slab applies to a given account, look at `InterestRateChart.findSlab(depositTenure, depositAmount)`. The `InterestRateChartSlabComparator` ensures slabs are ordered for binary search.
+To trace which slab applies to a given account, inspect the `chartSlabs` collection on `InterestRateChart` and compare each slab's `from_period`/`to_period` and `amount_range_from`/`amount_range_to` against the account's tenure and balance. The `InterestRateChartSlabComparator` is used internally to order slabs before validation.
 </Tip>
 
 ---

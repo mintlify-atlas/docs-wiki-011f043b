@@ -126,7 +126,8 @@ public class Loan extends AbstractAuditableWithUTCDateTimeCustom<Long> {
 Loan status is governed by `DefaultLoanLifecycleStateMachine` (implements `LoanLifecycleStateMachine`). Transitions are triggered by `LoanEvent` enum values. The status integer codes are defined in `LoanStatus`:
 
 ```java
-// fineract-core/src/main/java/org/apache/fineract/portfolio/loanaccount/domain/LoanStatus.java
+// fineract-core/src/main/java/org/apache/fineract/portfolio/loanaccount/domain/LoanStatus.java (enum)
+INVALID(0, ...),
 SUBMITTED_AND_PENDING_APPROVAL(100, ...),
 APPROVED(200, ...),
 ACTIVE(300, ...),
@@ -170,11 +171,11 @@ stateDiagram-v2
 
 | Operation | Handler class | Event |
 |---|---|---|
-| Submit application | `LoanApplicationSubmitCommandHandler` | `LOAN_CREATED` |
+| Submit application | `LoanApplicationSubmittalCommandHandler` | `LOAN_CREATED` |
 | Approve | `LoanApplicationApprovalCommandHandler` | `LOAN_APPROVED` |
 | Disburse | `DisburseLoanCommandHandler` | `LOAN_DISBURSED` |
 | Disburse to savings | `DisburseLoanToSavingsCommandHandler` | `LOAN_DISBURSED` |
-| Undo disbursal | `UndoLoanDisbursalCommandHandler` | `LOAN_DISBURSAL_UNDO` |
+| Undo disbursal | `UndoDisbursalLoanCommandHandler` | `LOAN_DISBURSAL_UNDO` |
 | Make repayment | `LoanRepaymentCommandHandler` | `LOAN_REPAYMENT_OR_WAIVER` |
 | Write-off | `WriteOffLoanCommandHandler` | `WRITE_OFF_OUTSTANDING` |
 | Charge-off | `ChargeOffLoanCommandHandler` | `LOAN_CONTRACT_TERMINATION` |
@@ -184,7 +185,7 @@ stateDiagram-v2
 | Credit balance refund | `CreditBalanceRefundCommandHandler` | `LOAN_CREDIT_BALANCE_REFUND` |
 | Chargeback | (processed by transaction processor) | `LOAN_CHARGEBACK` |
 
-All handlers are discovered via Spring's `@CommandScope` and routed by `PortfolioCommandSourceWritePlatformService`.
+All handlers are annotated with `@CommandType(entity = ..., action = ...)` and routed by `PortfolioCommandSourceWritePlatformService` via the `NewCommandSourceHandler` SPI.
 
 ---
 
@@ -228,6 +229,14 @@ public interface LoanRepaymentScheduleTransactionProcessor {
         MonetaryCurrency currency,
         List<LoanRepaymentScheduleInstallment> repaymentScheduleInstallments,
         Set<LoanCharge> charges);
+
+    Money handleRepaymentSchedule(
+        List<LoanTransaction> transactionsPostDisbursement,
+        MonetaryCurrency currency,
+        List<LoanRepaymentScheduleInstallment> installments,
+        Set<LoanCharge> loanCharges);
+
+    boolean isInterestFirstRepaymentScheduleTransactionProcessor();
 }
 ```
 
@@ -239,16 +248,17 @@ Located in `…/transactionprocessor/impl/`:
 
 | Class | Strategy code |
 |---|---|
-| `FineractStyleLoanRepaymentScheduleTransactionProcessor` | `mifos-standard` |
-| `HeavensFamilyLoanRepaymentScheduleTransactionProcessor` | `heavensfamily` |
-| `CreocoreLoanRepaymentScheduleTransactionProcessor` | `creocore` |
-| `RBILoanRepaymentScheduleTransactionProcessor` | `rbi-india` |
-| `PrincipalInterestPenaltyFeesOrderLoanRepaymentScheduleTransactionProcessor` | `principal-interest-in-advance` |
-| `InterestPrincipalPenaltyFeesOrderLoanRepaymentScheduleTransactionProcessor` | `interest-principal-penalties-fees` |
-| `EarlyPaymentLoanRepaymentScheduleTransactionProcessor` | `early-repayment` |
-| `DuePenFeeIntPriInAdvancePriPenFeeIntLoanRepaymentScheduleTransactionProcessor` | (due+advance ordering variant) |
+| `FineractStyleLoanRepaymentScheduleTransactionProcessor` | `mifos-standard-strategy` |
+| `HeavensFamilyLoanRepaymentScheduleTransactionProcessor` | `heavensfamily-strategy` |
+| `CreocoreLoanRepaymentScheduleTransactionProcessor` | `creocore-strategy` |
+| `RBILoanRepaymentScheduleTransactionProcessor` | `rbi-india-strategy` |
+| `PrincipalInterestPenaltyFeesOrderLoanRepaymentScheduleTransactionProcessor` | `principal-interest-penalties-fees-order-strategy` |
+| `InterestPrincipalPenaltyFeesOrderLoanRepaymentScheduleTransactionProcessor` | `interest-principal-penalties-fees-order-strategy` |
+| `EarlyPaymentLoanRepaymentScheduleTransactionProcessor` | `early-repayment-strategy` |
+| `DuePenFeeIntPriInAdvancePriPenFeeIntLoanRepaymentScheduleTransactionProcessor` | `due-penalty-fee-interest-principal-in-advance-principal-penalty-fee-interest-strategy` |
+| `DuePenIntPriFeeInAdvancePenIntPriFeeLoanRepaymentScheduleTransactionProcessor` | `due-penalty-interest-principal-fee-in-advance-penalty-interest-principal-fee-strategy` |
 
-For progressive (actuarial) loans, `AdvancedPaymentScheduleTransactionProcessor` is used — see [Progressive Loans](/loan/progressive-loan).
+For progressive (actuarial) loans, `AdvancedPaymentScheduleTransactionProcessor` is used with strategy code `advanced-payment-allocation-strategy` — see [Progressive Loans](/loan/progressive-loan).
 
 The active processor for a loan instance is resolved by `LoanRepaymentScheduleTransactionProcessorFactory` using `loan.getTransactionProcessingStrategyCode()`.
 
@@ -274,10 +284,24 @@ public interface LoanScheduleGenerator {
         LoanRepaymentScheduleTransactionProcessor loanRepaymentScheduleTransactionProcessor,
         LocalDate rescheduleFrom);
 
+    LoanScheduleDTO rescheduleNextInstallments(MathContext mc,
+        LoanApplicationTerms loanApplicationTerms,
+        Loan loan,
+        HolidayDetailDTO holidayDetailDTO,
+        LoanRepaymentScheduleTransactionProcessor loanRepaymentScheduleTransactionProcessor,
+        LocalDate rescheduleFrom,
+        LocalDate rescheduleTill);
+
     OutstandingAmountsDTO calculatePrepaymentAmount(
         MonetaryCurrency currency, LocalDate onDate,
         LoanApplicationTerms loanApplicationTerms,
-        MathContext mc, Loan loan, ...);
+        MathContext mc, Loan loan,
+        HolidayDetailDTO holidayDetailDTO,
+        LoanRepaymentScheduleTransactionProcessor loanRepaymentScheduleTransactionProcessor);
+
+    Money getPeriodInterestTillDate(
+        @NotNull LoanRepaymentScheduleInstallment installment,
+        @NotNull LocalDate targetDate);
 }
 ```
 

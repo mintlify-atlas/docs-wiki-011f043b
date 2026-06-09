@@ -42,7 +42,7 @@ Core enums (`GLAccountType`, `GLAccountUsage`, `JournalEntryType`) are published
 
 ## `GLAccount` entity
 
-**Source:** `fineract-core/.../accounting/glaccount/domain/GLAccount.java`  
+**Source:** `fineract-core/src/main/java/org/apache/fineract/accounting/glaccount/domain/GLAccount.java`  
 **Table:** `acc_gl_account`
 
 ```java
@@ -166,6 +166,7 @@ erDiagram
         Long id PK
         Long account_id FK
         Long office_id FK
+        Long payment_details_id FK
         string transaction_id
         int type_enum
         decimal amount
@@ -174,6 +175,7 @@ erDiagram
         boolean reversed
         Long loan_transaction_id
         Long savings_transaction_id
+        Long client_transaction_id
         Long share_transaction_id
     }
     Office {

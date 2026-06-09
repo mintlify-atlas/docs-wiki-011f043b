@@ -29,7 +29,7 @@ All sources live under `fineract-progressive-loan/src/main/java/org/apache/finer
 | `portfolio.loanaccount.loanschedule.domain` | `ProgressiveLoanScheduleGenerator` |
 | `portfolio.loanaccount.loanschedule.data` | `LoanSchedulePlan`, `LoanSchedulePlanRepaymentPeriod`, `LoanSchedulePlanDisbursementPeriod` |
 | `portfolio.loanaccount.domain` | `ProgressiveLoanModel`, `LoanCapitalizedIncomeBalance`, `LoanBuyDownFeeBalance` |
-| `portfolio.loanaccount.service` | `BuyDownFeePlatformService`, `CapitalizedIncomeBalanceServiceImpl`, `InterestScheduleModelRepositoryWrapper` |
+| `portfolio.loanaccount.service` | `BuyDownFeePlatformService`, `BuyDownFeeWritePlatformServiceImpl`, `CapitalizedIncomeBalanceServiceImpl`, `CapitalizedIncomeWritePlatformServiceImpl`, `InterestScheduleModelRepositoryWrapper`, `InterestScheduleModelRepositoryWrapperImpl` |
 | `portfolio.loanaccount.api` | `LoanBuyDownFeeApiResource`, `LoanCapitalizedIncomeApiResource` |
 | `portfolio.loanaccount.handler` | `AddCapitalizedIncomeCommandHandler`, `AddBuyDownFeeCommandHandler`, `CapitalizedIncomeAdjustmentCommandHandler`, `BuyDownFeeAdjustmentCommandHandler` |
 
@@ -196,7 +196,7 @@ public class RepaymentPeriod {
 
 ## `AdvancedPaymentScheduleTransactionProcessor`
 
-This processor extends `AbstractLoanRepaymentScheduleTransactionProcessor` and is selected when `transactionProcessingStrategyCode` equals `"advanced-payment-allocation"`. It lives in `fineract-progressive-loan/…/transactionprocessor/impl/`.
+This processor extends `AbstractLoanRepaymentScheduleTransactionProcessor` and is selected when `transactionProcessingStrategyCode` equals `"advanced-payment-allocation-strategy"`. It lives in `fineract-progressive-loan/…/transactionprocessor/impl/`.
 
 Key responsibilities:
 
@@ -213,7 +213,7 @@ The context object passed through transaction processing:
 ```java
 // fineract-progressive-loan/…/transactionprocessor/impl/ProgressiveTransactionCtx.java
 public class ProgressiveTransactionCtx extends TransactionCtx {
-    private ProgressiveLoanInterestScheduleModel interestScheduleModel;
+    private final ProgressiveLoanInterestScheduleModel model;
     // ...
 }
 ```
@@ -236,6 +236,12 @@ Rules are configured on the product (see [Loan Products](/loan/loan-products)) a
 | `GOODWILL_CREDIT` | Operational credit to customer |
 | `CHARGE_REFUND` | Refund of a previously paid charge |
 | `CHARGE_ADJUSTMENT` | Adjustment to charge amount |
+| `WAIVE_INTEREST` | Interest waiver transaction |
+| `CHARGE_PAYMENT` | Payment of a loan charge |
+| `REFUND_FOR_ACTIVE_LOAN` | Refund applied to an active loan |
+| `INTEREST_PAYMENT_WAIVER` | Waiver of interest payment due |
+| `INTEREST_REFUND` | Refund of interest previously paid |
+| `CAPITALIZED_INCOME_ADJUSTMENT` | Adjustment to capitalized income |
 
 `FutureInstallmentAllocationRule` values:
 
@@ -243,6 +249,7 @@ Rules are configured on the product (see [Loan Products](/loan/loan-products)) a
 |---|---|
 | `NEXT_INSTALLMENT` | Excess applied to the soonest upcoming installment |
 | `LAST_INSTALLMENT` | Excess prepays the last installment first |
+| `NEXT_LAST_INSTALLMENT` | Excess applied to next installment first, then last installment |
 | `REAMORTIZATION` | Outstanding balance redistributed across remaining periods, EMI recalculated |
 
 ---

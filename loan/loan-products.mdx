@@ -123,7 +123,7 @@ INVALID(2, "amortizationType.invalid");
 
 ## Product-to-GL account mapping
 
-Fineract maps loan products to general ledger accounts through `AccountingRuleType`, which controls which journal entries are posted and against which GL account codes. The `LoanProduct` entity has a `@ManyToOne` reference to a `Fund` and carries an `accountingType` via the embedded detail.
+Fineract maps loan products to general ledger accounts through `AccountingRuleType`, which controls which journal entries are posted and against which GL account codes. The `LoanProduct` entity has a `@ManyToOne` reference to a `Fund` and carries an `accountingRule` field (`AccountingRuleType` enum, stored in the `accounting_type` column).
 
 The four accounting rule types relevant to loan products:
 

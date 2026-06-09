@@ -105,7 +105,7 @@ are sent individually.
 
 ## Domain Coverage
 
-### `loan/v1/` — 27 schemas
+### `loan/v1/` — 39 schemas
 
 The largest domain, covering the full loan lifecycle:
 
@@ -125,7 +125,7 @@ The largest domain, covering the full loan lifecycle:
 | `CollectionDataV1` | Collection data snapshot |
 | `DelinquencyBucketDataV1`, `DelinquencyRangeDataV1` | Delinquency bucket/range |
 
-### `savings/v1/` — 11 schemas
+### `savings/v1/` — 12 schemas
 
 Covers savings accounts, transactions, charges, and lock status (`SavingsAccountStayedLockedDataV1`).
 
@@ -215,11 +215,12 @@ Enable Kafka-based event publishing in `application.properties`:
 ```properties
 fineract.events.external.enabled=${FINERACT_EXTERNAL_EVENTS_ENABLED:false}
 fineract.events.external.producer.kafka.enabled=${FINERACT_EXTERNAL_EVENTS_KAFKA_ENABLED:false}
+fineract.events.external.producer.kafka.timeout-in-seconds=${FINERACT_EXTERNAL_EVENTS_KAFKA_TIMEOUT_IN_SECONDS:10}
+fineract.events.external.producer.kafka.topic.auto-create=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_AUTO_CREATE:true}
 fineract.events.external.producer.kafka.topic.name=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_NAME:external-events}
 fineract.events.external.producer.kafka.topic.replicas=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_REPLICAS:1}
 fineract.events.external.producer.kafka.topic.partitions=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_PARTITIONS:10}
 fineract.events.external.producer.kafka.bootstrap-servers=${FINERACT_EXTERNAL_EVENTS_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-fineract.events.external.producer.kafka.topic.auto-create=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_AUTO_CREATE:true}
 # Producer tuning (key=value pairs separated by |)
 fineract.events.external.producer.kafka.producer.extra-properties=${FINERACT_EXTERNAL_EVENTS_KAFKA_PRODUCER_EXTRA_PROPERTIES:linger.ms=10|batch.size=16384}
 ```
@@ -232,6 +233,8 @@ fineract.events.external.producer.jms.broker-url=${FINERACT_EXTERNAL_EVENTS_PROD
 fineract.events.external.producer.jms.event-queue-name=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_QUEUE_NAME:}
 fineract.events.external.producer.jms.event-topic-name=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_TOPIC_NAME:}
 fineract.events.external.producer.jms.async-send-enabled=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_ASYNC_SEND_ENABLED:false}
+fineract.events.external.producer.jms.broker-username=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_BROKER_USERNAME:}
+fineract.events.external.producer.jms.broker-password=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_BROKER_PASSWORD:}
 ```
 
 ### Remote Job Message Handler (Kafka)

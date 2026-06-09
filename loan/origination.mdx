@@ -22,7 +22,7 @@ The `fineract-loan-origination` module provides originator attribution for loan 
 The module is guarded by `LoanOriginationModuleIsEnabledCondition`:
 
 ```java
-// fineract-loan-origination/…/config/LoanOriginationModuleIsEnabledCondition.java
+// fineract-loan-origination/…/loanorigination/config/LoanOriginationModuleIsEnabledCondition.java
 public class LoanOriginationModuleIsEnabledCondition extends PropertiesCondition {
     @Override
     protected boolean matches(FineractProperties properties) {
@@ -43,13 +43,13 @@ All sources live under `org.apache.fineract.portfolio.loanorigination` in `finer
 |---|---|
 | `…/api` | `LoanOriginatorApiResource`, `LoanOriginatorsApiResource`, `LoanOriginatorApiConstants` |
 | `…/domain` | `LoanOriginator`, `LoanOriginatorMapping`, `LoanOriginatorStatus`, repositories |
-| `…/data` | `LoanOriginatorData`, `LoanApplicationOriginatorData`, `LoanOriginatorTemplateData`, `LoanOriginatorsResponse`, `LoanOriginatorMappingResponse` |
-| `…/service` | `LoanOriginatorReadPlatformService`, write service implementations |
+| `…/data` | `LoanApplicationOriginatorData`, `LoanOriginatorTemplateData`, `LoanOriginatorsResponse`, `LoanOriginatorMappingResponse`, `LoanOriginatorRequestData` |
+| `…/service` | `LoanOriginatorReadPlatformService`, `LoanOriginatorWritePlatformService`, `LoanOriginatorReadPlatformServiceImpl`, `LoanOriginatorWritePlatformServiceImpl` |
 | `…/handler` | `CreateLoanOriginatorCommandHandler`, `UpdateLoanOriginatorCommandHandler`, `DeleteLoanOriginatorCommandHandler`, `AttachLoanOriginatorCommandHandler`, `DetachLoanOriginatorCommandHandler` |
-| `…/enricher` | `LoanAccountDataV1OriginatorEnricher`, `LoanDelinquencyRangeDataV1OriginatorEnricher`, `LoanChargeDataV1OriginatorEnricher`, `LoanTransactionDataV1OriginatorEnricher`, `LoanRepaymentDueDataV1OriginatorEnricher`, `LoanTransactionAdjustmentDataV1OriginatorEnricher` |
+| `…/enricher` | `LoanAccountDataV1OriginatorEnricher`, `LoanAccountDelinquencyRangeDataV1OriginatorEnricher`, `LoanChargeDataV1OriginatorEnricher`, `LoanTransactionDataV1OriginatorEnricher`, `LoanRepaymentDueDataV1OriginatorEnricher`, `LoanTransactionAdjustmentDataV1OriginatorEnricher`, `LoanOriginatorAvroMapper` |
 | `…/helper` | `LoanOriginatorDetailsResolver` |
-| `…/mapper` | `LoanOriginatorAvroMapper` |
-| `…/serialization` | Request deserializers and validators |
+| `…/mapper` | `LoanOriginatorMapper` |
+| `…/serialization` | `LoanOriginatorDataValidator`, `LoanApplicationOriginatorDataValidator` |
 | `…/exception` | Domain exceptions (see below) |
 | `…/config` | `LoanOriginationModuleIsEnabledCondition` |
 
@@ -241,7 +241,7 @@ The enricher is called during Avro serialization of `LoanAccountDataV1` business
 
 | Class | Enriches | Purpose |
 |---|---|---|
-| `LoanDelinquencyRangeDataV1OriginatorEnricher` | `LoanDelinquencyRangeDataV1` | Adds originator to delinquency events |
+| `LoanAccountDelinquencyRangeDataV1OriginatorEnricher` | `LoanDelinquencyRangeDataV1` | Adds originator to delinquency events |
 | `LoanChargeDataV1OriginatorEnricher` | `LoanChargeDataV1` | Adds originator to charge events |
 | `LoanTransactionDataV1OriginatorEnricher` | `LoanTransactionDataV1` | Adds originator to transaction events |
 | `LoanRepaymentDueDataV1OriginatorEnricher` | `LoanRepaymentDueDataV1` | Adds originator to repayment-due events |

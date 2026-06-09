@@ -36,6 +36,10 @@ public class JournalEntry extends AbstractAuditableWithUTCDateTimeCustom<Long> {
     private Office office;
 
     @ManyToOne
+    @JoinColumn(name = "payment_details_id")
+    private PaymentDetail paymentDetail;
+
+    @ManyToOne
     @JoinColumn(name = "account_id", nullable = false)
     private GLAccount glAccount;
 
@@ -79,6 +83,9 @@ public class JournalEntry extends AbstractAuditableWithUTCDateTimeCustom<Long> {
     @Column(name = "share_transaction_id")
     private Long shareTransactionId;
 
+    @Column(name = "description", length = 500)
+    private String description;
+
     @Column(name = "entity_type_enum", length = 50)
     private Integer entityType;
 
@@ -97,6 +104,7 @@ public class JournalEntry extends AbstractAuditableWithUTCDateTimeCustom<Long> {
 
 | Field | Notes |
 |---|---|
+| `payment_details_id` | Optional FK to `PaymentDetail` — populated for cash transactions that carry payment channel metadata |
 | `transaction_id` | String key grouping a balanced entry set (e.g. `"L123"`, `"S456"`). All DEBIT + CREDIT rows for one business event share this value. |
 | `type_enum` | `JournalEntryType.CREDIT = 1`, `JournalEntryType.DEBIT = 2` |
 | `manual_entry` | `true` for user-submitted entries via `/journalentries`; `false` for system-generated |
@@ -248,7 +256,7 @@ public interface JournalEntryRunningBalanceUpdateService {
 }
 ```
 
-`updateRunningBalance()` is called by a scheduled job (`Update Accounting Running Balances`) that computes the cumulative balance for each GL account across all offices. The running balance is stored on `acc_gl_journal_entry.running_balance` and is used by financial reports that need a point-in-time balance without aggregating all historical rows.
+`updateRunningBalance()` is called by a scheduled job (`Update Accounting Running Balances`) that computes the cumulative balance for each GL account across all offices. The service sets `is_running_balance_calculated = true` on processed journal entries and writes the organisation-level running balance into the `acc_gl_account` view used by financial reports that need a point-in-time balance.
 
 `updateOfficeRunningBalance(command)` scopes the recalculation to a single office, used after corrective postings or reversals.
 

@@ -52,8 +52,10 @@ public enum CommandState {
 public interface CommandHandler<REQ, RES> {
     RES handle(Command<REQ> command);
 
-    default RES fallback(Command<REQ> command, Throwable t) throws Throwable {
-        throw t;  // override for custom fallback behaviour
+    @SneakyThrows
+    default RES fallback(Command<REQ> command, Throwable t) {
+        // NOTE: any command handler can override this default to implement more specialized fallbacks.
+        throw t;
     }
 
     default boolean matches(Command<REQ> command) {
@@ -163,9 +165,9 @@ The `fineract-command-audit` module adds three more hooks (pre, post, error) tha
 
 ```java
 // Three hook contract interfaces:
-public interface CommandHookBefore<T>  { void onBefore(Command<T> command); }
-public interface CommandHookAfter<T>   { void onAfter(Command<T> command, Object response); }
-public interface CommandHookError<T>   { void onError(Command<T> command, Throwable t); }
+public interface CommandHookBefore<REQ>          { void onBefore(Command<REQ> command); }
+public interface CommandHookAfter<REQ, RES>      { void onAfter(Command<REQ> command, RES response); }
+public interface CommandHookError<REQ>           { void onError(Command<REQ> command, Throwable error); }
 ```
 
 `DefaultCommandHookManager` collects all beans implementing these interfaces and calls them in `@Order` sequence.
@@ -196,7 +198,7 @@ public final class CommandProperties implements Serializable {
 
 ### `JdbcCommandStore` and `CommandEntity`
 
-`JdbcCommandStore` is active when no other `CommandStore` bean exists and `fineract.command.jdbc.enabled=true` (default). It maps between `Command<T>` and the Spring Data JDBC entity `CommandEntity`:
+`JdbcCommandStore` (`org.apache.fineract.command.jdbc.store.JdbcCommandStore`) is active when no other `CommandStore` bean exists and `fineract.command.jdbc.enabled=true`. It maps between `Command<T>` and the Spring Data JDBC entity `CommandEntity`:
 
 ```java
 @Table("m_command")
@@ -251,7 +253,7 @@ The Resilience4j `commandStore` retry policy should be configured in `applicatio
 
 | Property | Env Var | Default | Description |
 |---|---|---|---|
-| `fineract.command.jdbc.enabled` | `FINERACT_COMMAND_JDBC_ENABLED` | `true` | Enable `JdbcCommandStore` |
+| `fineract.command.jdbc.enabled` | `FINERACT_COMMAND_JDBC_ENABLED` | `false` | Enable `JdbcCommandStore` |
 | `fineract.command.jdbc.file-dead-letter-queue-enabled` | `FINERACT_COMMAND_JDBC_FILE_DEAD_LETTER_QUEUE_ENABLED` | `false` | Write failed commands to disk |
 | `fineract.command.jdbc.file-dead-letter-queue-path` | `FINERACT_COMMAND_JDBC_FILE_DEAD_LETTER_QUEUE_PATH` | `/tmp/fineract/dlq` | DLQ directory |
 
