@@ -1,0 +1,163 @@
+---
+title: "fineract-core: Platform Infrastructure Backbone"
+sidebarTitle: "Fineract Core"
+description: "Deep dive into fineract-core: multi-tenancy, business date, caching, configuration, events, data queries, and the layered package pattern used throughout."
+---
+
+`fineract-core` is the heaviest module in the repository (787+ Java source files) and the single dependency that virtually every other module declares. It provides all cross-cutting infrastructure: the per-tenant datasource routing, JPA base classes, business date management, caching, global configuration, the internal and external event buses, Spring Batch job configuration, and the `dataqueries` (dynamic data-table) subsystem. Domain modules such as `fineract-loan` and `fineract-savings` extend these foundations rather than re-implementing them.
+
+## Top-Level Package Structure
+
+```
+org.apache.fineract
+├── accounting/          GL entity base classes shared with fineract-accounting
+├── batch/               Batch API: BatchRequest/BatchResponse, command resolution
+├── commands/            Legacy command-wrapper framework (pre-dates fineract-command)
+├── infrastructure/
+│   ├── accountnumberformat/
+│   ├── bulkimport/
+│   ├── businessdate/    Business date domain, service, API, handler
+│   ├── cache/           CacheType enum, CacheWritePlatformService
+│   ├── codes/           Code table management (fineract_codes)
+│   ├── configuration/   Global platform configuration (c_configuration table)
+│   ├── core/            Foundation: boot configs, JPA base, serialization, service utilities
+│   ├── dataqueries/     Dynamic data-table CRUD and report queries
+│   ├── documentmanagement/
+│   ├── event/           Internal BusinessEvent bus + external event pipeline
+│   ├── hooks/           HTTP webhook dispatch
+│   ├── instancemode/    Read/write/batch instance mode flags
+│   ├── jobs/            Spring Batch job registry, tenant-aware batch
+│   ├── security/        Security interfaces used by fineract-security impl
+│   └── springbatch/     Spring Batch utilities and tenant-aware wrappers
+├── interoperation/      Interop base types
+├── notification/        In-app notification service
+├── organisation/        Office/staff base types
+├── portfolio/           Portfolio-level base types (client, group, product)
+├── useradministration/  AppUser domain (entity, repository, DTO)
+└── util/                Shared utilities
+```
+
+## The `infrastructure.core` Package in Detail
+
+`infrastructure.core` is the foundation of foundations. Key sub-packages:
+
+### `infrastructure.core.boot`
+
+Contains `FineractWebApplicationConfiguration` and `FineractLiquibaseOnlyApplicationConfiguration`, both of which are `@Configuration` classes imported by `ServerApplication`. The web configuration activates Spring Security, JPA, Jersey (JAX-RS), Quartz scheduling, and caching.
+
+### `infrastructure.core.domain`
+
+Defines `AbstractPersistableCustom<T>` — the JPA base entity that all Fineract JPA entities extend. It handles ID generation and `equals`/`hashCode` by primary key.
+
+```java
+// All JPA entities extend this:
+public abstract class AbstractPersistableCustom<ID extends Serializable> { ... }
+```
+
+`FineractPlatformTenant` holds the per-tenant datasource coordinates that `TenantAwareBasicAuthenticationFilter` loads and stores via `ThreadLocalContextUtil`.
+
+### `infrastructure.core.service`
+
+Utility services used everywhere:
+- `ThreadLocalContextUtil` — stores the current `FineractPlatformTenant`, business dates, and auth token in a per-thread map. Always reset in `finally` blocks of authentication filters.
+- `DateUtils` — timezone-aware date arithmetic respecting the tenant's configured zone.
+- `DataEnricherProcessor` — a post-serialization pipeline for enriching Avro DTOs (e.g. adding tenant metadata) before they are passed to `ExternalEventService`.
+- `DatabaseTypeResolver` — detects whether the current tenant datasource is PostgreSQL or MySQL/MariaDB; used by `SqlInjectionPreventerServiceImpl`.
+
+### `infrastructure.core.serialization`
+
+`ToApiJsonSerializer<T>` is the central JSON serialization facade (wraps Gson). REST resources inject it as a generic singleton and call `.serialize(data)`.
+
+`FromJsonHelper` provides command parsing utilities that read a `JsonObject` and throw `InvalidJsonException` with field-level error messages.
+
+### `infrastructure.core.api`
+
+`JsonCommand` — the legacy command envelope that carries the raw JSON string, the `AppUser`, and the resource ID for the legacy command-wrapper framework. Gradually being replaced by the new typed `Command<T>` in `fineract-command`.
+
+### `infrastructure.core.aop`
+
+Houses AOP interceptors for idempotency checking on the legacy command path.
+
+## Business Date (`infrastructure.businessdate`)
+
+Fineract distinguishes "today" (`BUSINESS_DATE`) from the COB date (`COB_DATE`). Both are stored per-tenant in the `business_date` table and loaded into `ThreadLocalContextUtil` on every request.
+
+```
+businessdate/
+├── api/                BusinessDateApiResource    (@Path /v1/businessdate)
+├── command/            BusinessDateUpdateCommand
+├── domain/             BusinessDate (JPA entity), BusinessDateType (enum: BUSINESS_DATE, COB_DATE)
+├── exception/
+├── handler/            BusinessDateUpdateHandler  (implements CommandHandler)
+├── mapper/             BusinessDateMapper         (MapStruct)
+└── service/            BusinessDateReadPlatformService, BusinessDateWritePlatformService
+```
+
+`BusinessDateType` defines the two date contexts:
+
+```java
+public enum BusinessDateType {
+    BUSINESS_DATE, COB_DATE
+}
+```
+
+The `TenantAwareBasicAuthenticationFilter` calls `businessDateReadPlatformService.getBusinessDates()` immediately after tenant resolution and stores the result in `ThreadLocalContextUtil.setBusinessDates(businessDates)`. COB batch jobs advance the COB date; the business date is advanced by an operator or scheduled job.
+
+## Caching (`infrastructure.cache`)
+
+Fineract supports two cache modes controlled by `CacheType`:
+
+- `NO_CACHE` — disabled (default until first request is processed)
+- `SINGLE_NODE` — EhCache (activated by the `c_configuration` flag `is_ehcache_enabled`)
+
+`CacheWritePlatformService.switchToCache(CacheType)` is called by `TenantAwareBasicAuthenticationFilter` on the very first request. Cache switching is tenant-aware and idempotent.
+
+## Global Configuration (`infrastructure.configuration`)
+
+Platform-wide feature flags are stored in the `c_configuration` table and read through `ConfigurationDomainService`. Examples: `is_reschedule_future_repayments`, `is_ehcache_enabled`, `loan_reschedule_is_first_payday_allowed_on_holiday`.
+
+`ConfigurationDomainServiceJpa` implements the interface by querying `GlobalConfigurationRepository`.
+
+## Event Infrastructure (`infrastructure.event`)
+
+This is a deep sub-system; see [Event System](/core/event-system) for full detail. In summary:
+
+- **Internal bus** (`event.business`): `BusinessEventNotifierService` accepts `BusinessEvent<T>` instances and dispatches them synchronously to registered `BusinessEventListener<T>` beans. Listeners are registered either at startup (Spring beans) or dynamically via `addPostBusinessEventListener`.
+- **External pipeline** (`event.external`): `ExternalEventService.postEvent()` serializes events to Avro and persists them as `ExternalEvent` rows in `m_external_event`. A Spring Batch job then polls and publishes to the configured broker.
+
+## Data Queries (`infrastructure.dataqueries`)
+
+The `dataqueries` subsystem allows tenants to define additional custom columns (data tables) attached to standard Fineract entities (clients, loans, etc.) without schema migrations. API endpoints under `/v1/datatables` manage table definitions; runtime CRUD is at `/v1/datatables/{datatable}/{appTableId}`.
+
+`DatatableEntryCreatedBusinessEvent`, `DatatableEntryUpdatedBusinessEvent`, and `DatatableEntryDeletedBusinessEvent` (defined in `event.business.domain.datatable`) fire on each mutation.
+
+## Instance Mode (`infrastructure.instancemode`)
+
+Four boolean flags in `application.properties` control which subsystems are active on a given instance:
+
+| Property | Env var | Default |
+|---|---|---|
+| `fineract.mode.read-enabled` | `FINERACT_MODE_READ_ENABLED` | `true` |
+| `fineract.mode.write-enabled` | `FINERACT_MODE_WRITE_ENABLED` | `true` |
+| `fineract.mode.batch-worker-enabled` | `FINERACT_MODE_BATCH_WORKER_ENABLED` | `true` |
+| `fineract.mode.batch-manager-enabled` | `FINERACT_MODE_BATCH_MANAGER_ENABLED` | `true` |
+
+This enables horizontal scale-out: a read-only replica can set `write-enabled=false`; a dedicated batch node can disable read and write API endpoints.
+
+## How Other Modules Depend on `fineract-core`
+
+All domain modules declare `implementation project(':fineract-core')` in their `build.gradle`. Key shared contracts:
+- `AbstractPersistableCustom<ID>` — JPA entity base
+- `AppUser` (in `useradministration.domain`) — the authenticated principal everywhere
+- `AbstractBusinessEvent<T>` / `BusinessEventNotifierService` — event emission
+- `ThreadLocalContextUtil` — tenant and business date context
+- `ToApiJsonSerializer<T>` — JSON output
+- `JsonCommand` — legacy command parsing
+
+<Warning>
+Do not import `fineract-provider` classes from any domain module. The provider module is a one-way assembly target. Dependencies must flow toward `fineract-core`, never toward `fineract-provider`.
+</Warning>
+
+<Tip>
+When adding a new cross-cutting service (e.g. a new type of audit log), add it to `fineract-core` so all domain modules can use it without creating inter-module dependencies. Domain-specific behaviour belongs in the domain module, but shared infrastructure belongs here.
+</Tip>

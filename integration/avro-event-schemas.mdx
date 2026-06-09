@@ -1,0 +1,267 @@
+---
+title: "Apache Avro Event Schemas for Fineract Events"
+sidebarTitle: "Avro Schemas"
+description: "83 Apache Avro .avsc schema files in fineract-avro-schemas generate the Java classes used to serialize Fineract domain events to Kafka and ActiveMQ."
+---
+
+`fineract-avro-schemas` is a standalone Gradle module that contains 83 Apache
+Avro `.avsc` schema files and the Velocity templates used to generate Java
+classes from them. These classes are the serialisation format for all external
+events emitted by Fineract — published to Kafka topics or ActiveMQ queues when
+the respective producers are enabled. Consumers deserialise these bytes back to
+the generated Java types to process domain events downstream.
+
+<CardGroup cols={2}>
+  <Card title="Configuration" href="/deployment/configuration" icon="sliders">
+    Kafka and JMS producer properties for external events
+  </Card>
+  <Card title="Java Client SDK" href="/integration/java-client-sdk" icon="code">
+    Retrofit SDK for calling the Fineract REST API
+  </Card>
+</CardGroup>
+
+## Module Structure
+
+```
+fineract-avro-schemas/
+  src/main/avro/
+    MessageV1.avsc                  # top-level envelope
+    BulkMessagePayloadV1.avsc       # bulk envelope
+    BulkMessageItemV1.avsc          # one item in a bulk message
+    client/v1/                      # client domain
+    document/v1/                    # document domain
+    fixeddeposit/v1/                # fixed deposit accounts
+    generic/v1/                     # shared types (currency, code value, …)
+    gl/v1/                          # general ledger
+    group/v1/                       # group lending
+    loan/v1/                        # loan domain (largest set)
+    office/v1/                      # office hierarchy
+    payment/v1/                     # payment details
+    portfolio/v1/                   # shared portfolio types
+    recurringdeposit/v1/            # recurring deposit accounts
+    savings/v1/                     # savings accounts
+    share/v1/                       # share accounts
+    workingcapitalloan/v1/          # working capital loans
+  src/main/resources/avro-generator-templates/
+    record.vm                       # Velocity template for Avro records
+    enum.vm                         # Velocity template for Avro enums
+    fixed.vm
+    protocol.vm
+```
+
+## Top-Level Envelope: `MessageV1`
+
+Every event is wrapped in `MessageV1` before being sent to the broker:
+
+```json
+{
+  "name": "MessageV1",
+  "namespace": "org.apache.fineract.avro",
+  "type": "record",
+  "fields": [
+    { "name": "id",           "type": "long",   "doc": "The ID of the message to be sent" },
+    { "name": "source",       "type": "string", "doc": "A unique identifier of the source service" },
+    { "name": "type",         "type": "string", "doc": "e.g. LoanApprovedBusinessEvent" },
+    { "name": "category",     "type": "string", "doc": "e.g. LOAN" },
+    { "name": "createdAt",    "type": "string", "doc": "ISO_LOCAL_DATE_TIME, e.g. 2011-12-03T10:15:30" },
+    { "name": "businessDate", "type": "string", "doc": "ISO_LOCAL_DATE, e.g. 2011-12-03" },
+    { "name": "tenantId",     "type": "string", "doc": "e.g. default" },
+    { "name": "idempotencyKey","type": "string","doc": "for consumer de-duplication" },
+    { "name": "dataschema",   "type": "string", "doc": "e.g. org.apache.fineract.avro.loan.v1.LoanAccountDataV1" },
+    { "name": "data",         "type": "bytes",  "doc": "Avro-serialised payload" }
+  ]
+}
+```
+
+The `data` field contains the domain-specific payload serialised as Avro bytes.
+The `dataschema` field tells the consumer which schema class to use for
+deserialisation. Consumers look up the schema name, instantiate the corresponding
+generated class, and call `SpecificDatumReader` to decode.
+
+## Bulk Messaging
+
+`BulkMessagePayloadV1` wraps an array of `BulkMessageItemV1` objects for batched
+delivery:
+
+```json
+// BulkMessagePayloadV1
+{ "name": "BulkMessagePayloadV1", "fields": [
+    { "name": "datas", "type": { "type": "array", "items": "org.apache.fineract.avro.BulkMessageItemV1" } }
+]}
+
+// BulkMessageItemV1
+{ "name": "BulkMessageItemV1", "fields": [
+    { "name": "id",         "type": "long" },
+    { "name": "type",       "type": "string" },
+    { "name": "category",   "type": "string" },
+    { "name": "dataschema", "type": "string" },
+    { "name": "data",       "type": "bytes" }
+]}
+```
+
+`BulkMessageItemV1` omits `source`, `createdAt`, `businessDate`, `tenantId`, and
+`idempotencyKey` that are already captured on the outer envelope when the items
+are sent individually.
+
+## Domain Coverage
+
+### `loan/v1/` — 27 schemas
+
+The largest domain, covering the full loan lifecycle:
+
+| Schema | Purpose |
+|--------|---------|
+| `LoanAccountDataV1` | Full loan state snapshot — sent on most loan events |
+| `LoanTransactionDataV1` | Individual loan transaction (repayment, disbursement, etc.) |
+| `LoanScheduleDataV1` | Repayment schedule |
+| `LoanSchedulePeriodDataV1` | Single period within a schedule |
+| `LoanSummaryDataV1` | Outstanding balances snapshot |
+| `LoanOwnershipTransferDataV1` | Investor transfer event payload |
+| `LoanAccountDelinquencyRangeDataV1` | Delinquency classification |
+| `LoanChargeDataV1` | Loan charge details |
+| `LoanTransactionAdjustmentDataV1` | Transaction adjustment records |
+| `LoanRepaymentDueDataV1` | Upcoming repayment notification |
+| `LoanProductDataV1` | Loan product definition |
+| `CollectionDataV1` | Collection data snapshot |
+| `DelinquencyBucketDataV1`, `DelinquencyRangeDataV1` | Delinquency bucket/range |
+
+### `savings/v1/` — 11 schemas
+
+Covers savings accounts, transactions, charges, and lock status (`SavingsAccountStayedLockedDataV1`).
+
+### `client/v1/` — 3 schemas
+
+`ClientDataV1`, `ClientTimelineDataV1`, `ClientCollateralManagementV1`.
+
+### `fixeddeposit/v1/` and `recurringdeposit/v1/`
+
+`FixedDepositAccountDataV1` and `RecurringDepositAccountDataV1` respectively.
+
+### `share/v1/` — 7 schemas
+
+`ShareAccountDataV1`, `ShareProductDataV1`, and supporting types.
+
+### `generic/v1/` — 6 schemas
+
+Shared types referenced by multiple domains: `CurrencyDataV1`, `CodeValueDataV1`,
+`CalendarDataV1`, `EnumOptionDataV1`, `StringEnumOptionDataV1`,
+`CommandProcessingResultV1`.
+
+### `gl/v1/`, `group/v1/`, `office/v1/`, `payment/v1/`, `portfolio/v1/`, `document/v1/`
+
+One to two schemas each for general ledger accounts, groups, offices, payment
+detail/type, portfolio accounts/charges/rates, and document metadata.
+
+## Nullable Union Pattern
+
+All fields in domain schemas use the nullable union pattern for forward and
+backward compatibility:
+
+```json
+{
+    "default": null,
+    "name": "accountNo",
+    "type": ["null", "string"]
+}
+```
+
+`"null"` is always the first type in the union and the default is `null`. This
+ensures:
+- **Forward compatibility**: consumers on older schema versions ignore new fields.
+- **Backward compatibility**: producers on older schemas emit `null` for fields
+  that did not yet exist.
+
+Never change the order of `["null", "T"]` — Avro resolves union branches by
+index, so reversing to `["T", "null"]` would break deserialisation.
+
+## Financial Precision: `bigdecimal`
+
+Financial amount fields (principal, interest, fees) do not use Avro's `double`
+type. Instead they reference a logical type named `bigdecimal`:
+
+```json
+{
+    "default": null,
+    "name": "principalDisbursed",
+    "type": ["null", "bigdecimal"]
+}
+```
+
+This maps to `java.math.BigDecimal` in the generated Java classes, preserving
+arbitrary precision. The `bigdecimal` type is a named type resolved by the Avro
+tooling configuration in the `fineract-avro-schemas` Gradle build.
+
+## Code Generation
+
+Java classes are generated at build time from `.avsc` files using the Apache
+Avro Maven/Gradle plugin with Velocity templates:
+
+```
+src/main/resources/avro-generator-templates/
+  record.vm   → generates Java class for each Avro record
+  enum.vm     → generates Java enum for each Avro enum
+```
+
+Generated classes land in the module's `build/` directory and are included in
+the published JAR. Downstream modules (e.g. `fineract-provider`) declare a
+compile dependency on `fineract-avro-schemas`.
+
+## Configuration
+
+### Kafka External Events Producer
+
+Enable Kafka-based event publishing in `application.properties`:
+
+```properties
+fineract.events.external.enabled=${FINERACT_EXTERNAL_EVENTS_ENABLED:false}
+fineract.events.external.producer.kafka.enabled=${FINERACT_EXTERNAL_EVENTS_KAFKA_ENABLED:false}
+fineract.events.external.producer.kafka.topic.name=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_NAME:external-events}
+fineract.events.external.producer.kafka.topic.replicas=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_REPLICAS:1}
+fineract.events.external.producer.kafka.topic.partitions=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_PARTITIONS:10}
+fineract.events.external.producer.kafka.bootstrap-servers=${FINERACT_EXTERNAL_EVENTS_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+fineract.events.external.producer.kafka.topic.auto-create=${FINERACT_EXTERNAL_EVENTS_KAFKA_TOPIC_AUTO_CREATE:true}
+# Producer tuning (key=value pairs separated by |)
+fineract.events.external.producer.kafka.producer.extra-properties=${FINERACT_EXTERNAL_EVENTS_KAFKA_PRODUCER_EXTRA_PROPERTIES:linger.ms=10|batch.size=16384}
+```
+
+### JMS External Events Producer (ActiveMQ)
+
+```properties
+fineract.events.external.producer.jms.enabled=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_ENABLED:false}
+fineract.events.external.producer.jms.broker-url=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_BROKER_URL:tcp://127.0.0.1:61616}
+fineract.events.external.producer.jms.event-queue-name=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_QUEUE_NAME:}
+fineract.events.external.producer.jms.event-topic-name=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_TOPIC_NAME:}
+fineract.events.external.producer.jms.async-send-enabled=${FINERACT_EXTERNAL_EVENTS_PRODUCER_JMS_ASYNC_SEND_ENABLED:false}
+```
+
+### Remote Job Message Handler (Kafka)
+
+The COB job partitioned worker uses a separate Kafka topic distinct from external events:
+
+```properties
+fineract.remote-job-message-handler.kafka.enabled=${FINERACT_REMOTE_JOB_MESSAGE_HANDLER_KAFKA_ENABLED:false}
+fineract.remote-job-message-handler.kafka.topic.name=${FINERACT_REMOTE_JOB_MESSAGE_HANDLER_KAFKA_TOPIC_NAME:job-topic}
+fineract.remote-job-message-handler.kafka.topic.partitions=${FINERACT_REMOTE_JOB_MESSAGE_HANDLER_KAFKA_TOPIC_PARTITIONS:10}
+fineract.remote-job-message-handler.kafka.bootstrap-servers=${FINERACT_REMOTE_JOB_MESSAGE_HANDLER_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+fineract.remote-job-message-handler.kafka.consumer.group-id=${FINERACT_REMOTE_JOB_MESSAGE_HANDLER_KAFKA_CONSUMER_GROUPID:fineract-consumer-group-id}
+```
+
+<Note>
+External events (loan state changes published outward) and remote job messages
+(COB worker coordination) use **separate** Kafka topics, separate bootstrap
+server configuration keys, and separate producer/consumer settings.
+</Note>
+
+## Key Schema Files Quick Reference
+
+| Path | Namespace | Primary Use |
+|------|-----------|-------------|
+| `MessageV1.avsc` | `org.apache.fineract.avro` | All event envelopes |
+| `BulkMessagePayloadV1.avsc` | `org.apache.fineract.avro` | Batched delivery |
+| `loan/v1/LoanAccountDataV1.avsc` | `org.apache.fineract.avro.loan.v1` | Loan approved, closed, COB snapshot |
+| `loan/v1/LoanTransactionDataV1.avsc` | `org.apache.fineract.avro.loan.v1` | Repayment, disbursement events |
+| `loan/v1/LoanOwnershipTransferDataV1.avsc` | `org.apache.fineract.avro.loan.v1` | Investor transfer events |
+| `savings/v1/SavingsAccountDataV1.avsc` | `org.apache.fineract.avro.savings.v1` | Savings account events |
+| `client/v1/ClientDataV1.avsc` | `org.apache.fineract.avro.client.v1` | Client create/update |
+| `generic/v1/CurrencyDataV1.avsc` | `org.apache.fineract.avro.generic.v1` | Referenced by all financial schemas |
+| `workingcapitalloan/v1/WorkingCapitalLoanTransactionDataV1.avsc` | `org.apache.fineract.avro.workingcapitalloan.v1` | Working capital loan transactions |

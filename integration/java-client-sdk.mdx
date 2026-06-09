@@ -1,0 +1,254 @@
+---
+title: "Java Client SDK for Apache Fineract"
+sidebarTitle: "Java SDK"
+description: "The fineract-client module provides a Retrofit 2 + OkHttp Java SDK with 70+ generated service interfaces, typed error handling, and multi-part upload helpers."
+---
+
+`fineract-client` is the official Java SDK for Apache Fineract. It is generated
+from the OpenAPI specification and shipped as a Maven artifact. Under the hood it
+uses Retrofit 2 backed by OkHttp, with Gson for JSON serialisation. The SDK is
+used directly by the Fineract integration-test suite
+(`integration-tests/src/test/java/org/apache/fineract/integrationtests/`) and
+is the recommended way to call the Fineract REST API from any JVM application.
+
+<CardGroup cols={2}>
+  <Card title="Avro Event Schemas" href="/integration/avro-event-schemas" icon="bolt">
+    Consume Fineract events from Kafka/JMS using generated Avro classes
+  </Card>
+  <Card title="Interoperability" href="/integration/interoperability" icon="network-wired">
+    Mojaloop FSP integration layer
+  </Card>
+</CardGroup>
+
+## Module Layout
+
+```
+fineract-client/
+  src/main/java/org/apache/fineract/client/
+    services/          # 70+ generated Retrofit service interfaces (one per API tag)
+    models/            # Generated request/response POJOs
+    auth/              # ApiKeyAuth, HttpBasicAuth interceptors
+    util/
+      FineractClient.java   # Builder entry point
+      Calls.java            # Call execution helpers
+      CallFailedRuntimeException.java
+      Parts.java            # Multipart upload factory
+      JSON.java             # Gson configuration
+      adapter/ExternalIdAdapter.java
+```
+
+There is also a `fineract-client-feign` module that exposes the same API surface
+via OpenFeign for teams that prefer declarative HTTP clients in a Spring Cloud
+stack.
+
+## Building the Client
+
+```java
+FineractClient fineract = FineractClient.builder()
+    .baseURL("https://localhost:8443/fineract-provider/api/v1/")
+    .tenant("default")
+    .basicAuth("mifos", "password")
+    .build();
+```
+
+The `Builder` (static inner class of `FineractClient`) is the single entry point. Under the hood `.build()`:
+
+1. Sets the Retrofit base URL.
+2. Attaches an `ApiKeyAuth` interceptor that injects `fineract-platform-tenantid: <tenant>` on every request.
+3. Attaches an `HttpBasicAuth` interceptor for `Authorization: Basic …`.
+4. Builds the `OkHttpClient` and `Retrofit` instances.
+
+All 70+ service interfaces are instantiated lazily via `retrofit.create(ServiceClass.class)` and exposed as public fields directly on `FineractClient` (e.g. `fineract.staff`, `fineract.loans`, `fineract.clients`).
+
+### Builder Options
+
+| Method | Description | Default |
+|--------|-------------|---------|
+| `baseURL(String)` | Full API base URL including `/api/v1/` | required |
+| `tenant(String)` | Tenant identifier injected as header | required |
+| `basicAuth(String, String)` | Username + password | required for Basic Auth |
+| `logging(Level)` | OkHttp `HttpLoggingInterceptor` level (`NONE`, `BASIC`, `HEADERS`, `BODY`) | not set |
+| `readTimeout(Duration)` | OkHttp read timeout | OkHttp default (10 s) |
+| `insecure(boolean)` | Skip TLS certificate validation — **dev only** | `false` |
+
+### Date Format
+
+```java
+public static final String DATE_FORMAT = "yyyy-MM-dd";
+```
+
+All date fields in request bodies must be formatted as `yyyy-MM-dd`. The Gson
+`JSON` utility class is pre-configured to handle `LocalDate` serialisation using
+this format.
+
+### Custom Interceptors
+
+Access the underlying OkHttp builder before calling `.build()` to add
+authentication headers, tracing, or retry logic:
+
+```java
+FineractClient.Builder builder = FineractClient.builder()
+    .baseURL("https://localhost:8443/fineract-provider/api/v1/")
+    .tenant("default")
+    .basicAuth("mifos", "password");
+
+// Add a custom interceptor
+builder.getOkBuilder().addInterceptor(chain -> {
+    Request request = chain.request().newBuilder()
+        .addHeader("X-Correlation-ID", UUID.randomUUID().toString())
+        .build();
+    return chain.proceed(request);
+});
+
+FineractClient fineract = builder.build();
+```
+
+`getOkBuilder()` returns the mutable `OkHttpClient.Builder` before it is locked
+by `.build()`. Similarly, `getRetrofitBuilder()` exposes the `Retrofit.Builder`.
+
+### SSL Bypass for Development
+
+```java
+FineractClient fineract = FineractClient.builder()
+    .baseURL("https://localhost:8443/fineract-provider/api/v1/")
+    .tenant("default")
+    .basicAuth("mifos", "password")
+    .insecure(true)  // DO NOT USE IN PRODUCTION
+    .build();
+```
+
+`insecure(true)` installs a no-op `X509TrustManager` and an always-true
+`HostnameVerifier`. This is intentionally documented in the source as only for
+`localhost:8443` dev servers with self-signed certificates.
+
+## Executing Calls — The `Calls` Helper
+
+Retrofit `Call<T>` objects are synchronous when executed with `Calls`:
+
+```java
+// Returns T directly, throws CallFailedRuntimeException on any non-2xx
+public static <T> T ok(Call<T> call)
+
+// Returns Response<T>, throws CallFailedRuntimeException on any non-2xx
+public static <T> Response<T> okR(Call<T> call)
+
+// Returns Response<T> even for non-2xx; use in tests asserting error codes
+public static <T> Response<T> executeU(Call<T> call)
+```
+
+The recommended usage for production code is `Calls.ok()`. Use `Calls.executeU()`
+in tests when you deliberately want to inspect a 4xx/5xx response body.
+
+### Real Example from `FineractClientDemo`
+
+```java
+// From fineract-client/src/test/java/org/apache/fineract/client/test/FineractClientDemo.java
+
+FineractClient fineract = FineractClient.builder()
+    .baseURL("https://demo.fineract.dev/fineract-provider/api/v1/")
+    .tenant("default")
+    .basicAuth("mifos", "password")
+    .build();
+
+List<StaffData> staff = Calls.ok(fineract.staff.retrieveAllStaff(1L, true, false, "ACTIVE"));
+String name = staff.get(0).getDisplayName();
+log.info("Display name: {}", name);
+```
+
+This is the canonical snippet shown in the Fineract developer documentation. The
+`fineract.staff` field is a `StaffApi` instance created by Retrofit.
+
+## `CallFailedRuntimeException`
+
+`CallFailedRuntimeException` is thrown by all three `Calls` methods when
+something goes wrong. It wraps either an `IOException` (network-level failure) or
+a `Response` with a non-2xx status code. The exception message includes the
+original request URL, response status, `response.message()`, and the full
+`errorBody` string where available.
+
+```java
+try {
+    LoanAccountData loan = Calls.ok(fineract.loans.retrieveLoan(loanId, false));
+} catch (CallFailedRuntimeException e) {
+    Response<?> response = e.getResponse(); // null if network failure
+    int httpStatus = response != null ? response.code() : -1;
+    // handle
+}
+```
+
+Both `getCall()` and `getResponse()` are available on the exception for detailed
+introspection.
+
+## Service Interfaces
+
+There are over 70 generated service interfaces in `org.apache.fineract.client.services`. Prominent ones include:
+
+| Field on `FineractClient` | Interface | Domain |
+|--------------------------|-----------|--------|
+| `fineract.loans` | `LoansApi` | Loan CRUD, disburse, repay |
+| `fineract.loanTransactions` | `LoanTransactionsApi` | Repayments, adjustments |
+| `fineract.clients` | `ClientApi` | Client management |
+| `fineract.externalAssetOwners` | `ExternalAssetOwnersApi` | Investor transfers |
+| `fineract.savingsAccounts` | `SavingsAccountApi` | Savings products |
+| `fineract.fixedDepositAccounts` | `FixedDepositAccountApi` | Fixed deposit accounts |
+| `fineract.journalEntries` | `JournalEntriesApi` | Accounting |
+| `fineract.staff` | `StaffApi` | Staff management |
+| `fineract.offices` | `OfficesApi` | Office hierarchy |
+| `fineract.groups` | `GroupsApi` | Group lending |
+| `fineract.charges` | `ChargesApi` | Charge definitions |
+| `fineract.loanProducts` | `LoanProductsApi` | Loan product templates |
+| `fineract.batchApi` | `BatchApiApi` | Batch API |
+| `fineract.inlineCob` | `InternalCobApi` | COB trigger |
+
+## Multi-Part Uploads — The `Parts` Helper
+
+Binary uploads (documents, images) use the `Parts` factory:
+
+```java
+import org.apache.fineract.client.util.Parts;
+import okhttp3.MultipartBody.Part;
+
+// From a File
+Part filePart = Parts.fromFile(new File("/path/to/document.pdf"));
+
+// From byte[]
+Part filePart = Parts.fromBytes("statement.csv", csvBytes);
+```
+
+`Parts.fromFile()` and `Parts.fromBytes()` auto-detect MIME type from the file
+extension and wrap the content as `multipart/form-data` with field name `"file"`.
+These parts are passed to `DocumentsApiFixed.createDocument(...)` or
+`ImagesApi.create(...)`.
+
+<Note>
+`DocumentsApiFixed` is a manually written class (not generated) that fixes
+multipart content-type handling that the OpenAPI generator does not emit
+correctly. Use `fineract.documents` (which points to `DocumentsApiFixed`) rather
+than any other documents service.
+</Note>
+
+## Creating a Custom Service
+
+If you extend Fineract with your own REST endpoints and want to call them from
+the client:
+
+```java
+// Define your Retrofit interface
+interface MyCustomApi {
+    @GET("v1/my-extension/{id}")
+    Call<MyData> getById(@Path("id") Long id);
+}
+
+// Build the client normally, then create a custom service
+FineractClient fineract = FineractClient.builder()
+    .baseURL("https://localhost:8443/fineract-provider/api/v1/")
+    .tenant("default")
+    .basicAuth("mifos", "password")
+    .build();
+
+MyCustomApi myApi = fineract.createService(MyCustomApi.class);
+MyData data = Calls.ok(myApi.getById(42L));
+```
+
+`FineractClient.createService(Class<S>)` delegates directly to
+`retrofit.create(serviceClass)`.

@@ -1,0 +1,254 @@
+---
+title: "Database Migrations with Liquibase"
+sidebarTitle: "DB Migrations"
+description: "Fineract uses Liquibase for schema management across two targets — fineract_tenants and fineract_default — with per-module changelogs and PostgreSQL/MySQL context switching."
+---
+
+Apache Fineract uses Liquibase to manage all database schema changes. The master
+changelog is at
+`fineract-provider/src/main/resources/db/changelog/db.changelog-master.xml` and
+orchestrates two schema targets, the core tenant changeset sequence, and
+per-module extensions. Migrations run automatically at application startup before
+Spring Boot serves any traffic.
+
+<CardGroup cols={2}>
+  <Card title="Configuration" href="/deployment/configuration" icon="sliders">
+    Liquibase enable/disable flag and datasource settings
+  </Card>
+  <Card title="Docker Compose" href="/deployment/docker-compose" icon="docker">
+    Worker instances must disable Liquibase
+  </Card>
+</CardGroup>
+
+## Two Schema Targets
+
+| Schema | Context Flag | Purpose |
+|--------|-------------|---------|
+| `fineract_tenants` | `tenant_store_db` | Tenant registry: one row per registered tenant, JDBC connection parameters |
+| `fineract_default` (per-tenant) | `tenant_db` | All domain tables for a single tenant |
+
+The master changelog selects the appropriate changeset tree using Liquibase
+`context` attributes:
+
+```xml
+<include file="tenant-store/changelog-tenant-store.xml"
+         context="tenant_store_db AND !initial_switch"/>
+<include file="tenant/changelog-tenant.xml"
+         context="tenant_db AND !initial_switch"/>
+```
+
+The `initial_switch` context is used for one-time migration from older Fineract
+releases.
+
+## Master Changelog
+
+`fineract-provider/src/main/resources/db/changelog/db.changelog-master.xml`:
+
+```xml
+<databaseChangeLog ...>
+    <!-- DB-specific property aliases -->
+    <property name="current_date"     value="CURDATE()"          context="mysql"/>
+    <property name="current_date"     value="CURRENT_DATE"       context="postgresql"/>
+    <property name="uuid"             value="uuid()"             context="mysql"/>
+    <property name="uuid"             value="uuid_generate_v4()" context="postgresql"/>
+
+    <!-- Tenant store (fineract_tenants schema) -->
+    <include file="tenant-store/changelog-tenant-store.xml"
+             context="tenant_store_db AND !initial_switch"/>
+
+    <!-- Core tenant schema (fineract_default) -->
+    <include file="tenant/changelog-tenant.xml"
+             context="tenant_db AND !initial_switch"/>
+
+    <!-- Module-specific changelogs — add new modules at the END -->
+    <include file="db/changelog/tenant/module/loan/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+    <include file="db/changelog/tenant/module/investor/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+    <include file="db/changelog/tenant/module/savings/parts/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+
+    <!-- Custom extension point -->
+    <includeAll path="db/custom-changelog" errorIfMissingOrEmpty="false"
+                context="tenant_db AND !initial_switch AND custom_changelog"/>
+
+    <!-- Additional modules -->
+    <include file="/db/changelog/tenant/module/progressiveloan/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+    <include file="db/changelog/tenant/module/loanorigination/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+    <include file="db/changelog/tenant/module/command/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+    <include file="db/changelog/tenant/module/workingcapitalloan/module-changelog-master.xml"
+             context="tenant_db AND !initial_switch"/>
+
+    <!-- Post-module finalization scripts -->
+    <include file="tenant/final-changelog-tenant.xml"
+             context="tenant_db AND !initial_switch"/>
+</databaseChangeLog>
+```
+
+<Warning>
+New modules must be added at the **end** of the module list to preserve
+auto-increment IDs for all previously migrated data. Inserting a module in the
+middle shifts IDs and will corrupt existing installations.
+</Warning>
+
+## Core Tenant Changeset Sequence
+
+`fineract-provider/src/main/resources/db/changelog/tenant/parts/` contains 236
+sequential XML changesets numbered `0001` through `0236`:
+
+```
+0001_initial_schema.xml        → base tables (loans, savings, clients, offices, …)
+0002_initial_data.xml          → seed data (permission codes, product templates)
+...
+0236_<description>.xml         → most recent core schema change
+```
+
+## Tenant Store Changesets
+
+`db/changelog/tenant-store/parts/` contains 11 changesets covering:
+
+- `0001` Initial tenant_store schema
+- `0002` Seed data (default tenant)
+- `0003` PostgreSQL sequence reset
+- `0004` Read-only DB connection support
+- `0005` JDBC connection string format
+- `0006` Drop retry parameter columns
+- `0007` Encrypt existing tenant passwords
+- `0007_x` Extend tenant RO passwords
+- `0008` Encrypt existing RO passwords
+- `0009` Set and encrypt RO if not exists
+- `0010` Set datetime precision
+- `0011` Standardise character set and collation
+
+## Module Changelogs
+
+Each functional module ships its own Liquibase changelog under its own
+`src/main/resources` tree. The master changelog includes them in order.
+
+### `fineract-investor` — 22 Parts
+
+Located at `fineract-investor/src/main/resources/db/changelog/tenant/module/investor/parts/`:
+
+| Part | Description |
+|------|-------------|
+| `0001` | Initial investor schema (`m_external_asset_owner`, `m_external_asset_owner_transfer`) |
+| `0002` | Asset schemas refinements |
+| `0003` | Asset schemas additions |
+| `0004` | Change `purchase_price_ratio` column type |
+| `0005` | Add sale and buyback command permissions |
+| `0006` | Asset schemas v3 |
+| `0007` | Add `m_external_asset_owner_transfer_details` table |
+| `0008` | Add journal entry and loan mapping tables |
+| `0009` | Add loan ownership transfer event tables |
+| `0010–0022` | Subsequent schema evolution including intermediate statuses, delayed settlement, previous owner reference, journal entry aggregation |
+
+### `fineract-loan`
+
+Per-module changelog under `fineract-loan/src/main/resources/db/changelog/tenant/module/loan/`.
+
+### `fineract-savings`
+
+Under `fineract-savings/src/main/resources/db/changelog/tenant/module/savings/parts/`.
+
+### `fineract-progressive-loan`
+
+Under `fineract-progressive-loan/src/main/resources/db/changelog/tenant/module/progressiveloan/`.
+
+### `fineract-command-jdbc` — 2 Parts
+
+Under `fineract-command-jdbc/src/main/resources/db/changelog/tenant/module/command/`.
+
+### `fineract-loan-origination`
+
+Under `fineract-loan-origination/src/main/resources/db/changelog/tenant/module/loanorigination/`.
+
+## Database Context Switching
+
+Liquibase contexts (`mysql`, `postgresql`) select DB-specific SQL fragments:
+
+```xml
+<changeSet id="..." author="..." context="mysql">
+    <sql>ALTER TABLE m_loan ADD COLUMN ...</sql>
+</changeSet>
+
+<changeSet id="..." author="..." context="postgresql">
+    <sql>ALTER TABLE m_loan ADD COLUMN ...</sql>
+</changeSet>
+```
+
+The master changelog defines property aliases so that shared changesets can use
+`${uuid}` and `${current_date}` tokens that expand to the correct function for
+each database:
+
+```xml
+<property name="uuid" value="uuid()"             context="mysql"/>
+<property name="uuid" value="uuid_generate_v4()" context="postgresql"/>
+```
+
+## Custom Changelog Extension Point
+
+```xml
+<includeAll path="db/custom-changelog" errorIfMissingOrEmpty="false"
+            context="tenant_db AND !initial_switch AND custom_changelog"/>
+```
+
+Place custom `.xml` changeset files in
+`fineract-provider/src/main/resources/db/custom-changelog/`. They are applied
+only when the `custom_changelog` context is active. Use this for:
+
+- Additional tables for custom modules (see [Build System — Custom Extension Pattern](/deployment/build-system))
+- Data migrations for custom integrations
+- Tenant-specific seed data
+
+## Writing a New Changeset
+
+### Naming Convention
+
+```
+<module>/src/main/resources/db/changelog/tenant/module/<module>/parts/
+  NNNN_<short_description>.xml
+```
+
+Where `NNNN` is the next sequential number for that module's changelog.
+
+### Required Attributes
+
+```xml
+<changeSet id="<module>-NNNN" author="<github-username>">
+    <!-- context is optional; omit for DB-agnostic SQL -->
+    <!-- or use context="mysql" / context="postgresql" for DB-specific -->
+    <preConditions onFail="MARK_RAN">
+        <not><tableExists tableName="my_new_table"/></not>
+    </preConditions>
+    <createTable tableName="my_new_table">
+        <column name="id" type="BIGINT" autoIncrement="true">
+            <constraints primaryKey="true" nullable="false"/>
+        </column>
+        <column name="name" type="VARCHAR(100)">
+            <constraints nullable="false"/>
+        </column>
+    </createTable>
+</changeSet>
+```
+
+**Rules:**
+- `id` must be unique across the entire changelog (use a module-prefixed pattern).
+- Always include `author`.
+- Use `<preConditions onFail="MARK_RAN">` for idempotent DDL to protect
+  against re-runs on already-migrated databases.
+- Add DB-specific changesets in pairs (one with `context="mysql"`, one with
+  `context="postgresql"`) when the SQL differs between databases.
+- Register the new XML file in the module's `module-changelog-master.xml`.
+
+## Total Scale
+
+The full Fineract changelog tree (as of the current codebase snapshot) contains:
+
+- **257** XML files across all modules and the provider
+- **236** sequential core tenant parts (0001–0236)
+- **22** investor module parts (0001–0022)
+- **11** tenant-store parts
+- Multiple parts across loan, savings, command, progressive-loan, and other modules

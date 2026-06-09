@@ -1,0 +1,231 @@
+---
+title: "Mojaloop / FSP Interoperability Layer"
+sidebarTitle: "Interoperability"
+description: "The interoperation package in fineract-savings and fineract-provider connects Fineract to mobile money switches and payment schemes using Mojaloop-compatible APIs."
+---
+
+The interoperability layer in Apache Fineract enables integration with mobile
+money switches and payment scheme adapters — most notably the Mojaloop
+open-source payment platform. It provides REST endpoints under `/v1/interoperation`
+that translate Mojaloop-style quote/transfer requests into Fineract savings
+account transactions. Savings accounts serve as the wallet or account that
+backs each interoperability participant.
+
+<CardGroup cols={2}>
+  <Card title="Java Client SDK" href="/integration/java-client-sdk" icon="code">
+    Call the interoperation endpoints from Java
+  </Card>
+  <Card title="Avro Event Schemas" href="/integration/avro-event-schemas" icon="bolt">
+    Event schemas for savings account transactions
+  </Card>
+</CardGroup>
+
+## Package Layout
+
+The interoperation code is split across two modules:
+
+```
+fineract-savings/src/main/java/org/apache/fineract/interoperation/
+  data/
+    InteropAccountData.java
+    InteropIdentifierData.java
+    InteropIdentifierAccountResponseData.java
+    InteropIdentifiersResponseData.java
+    InteropQuoteRequestData.java / InteropQuoteResponseData.java
+    InteropTransactionRequestData.java / ...ResponseData.java
+    InteropTransferRequestData.java / ...ResponseData.java
+    InteropTransactionsData.java
+    InteropKycResponseData.java
+  domain/
+    InteropIdentifier.java
+    InteropIdentifierType.java  (enum)
+    InteropActionState.java     (enum)
+    InteropAmountType.java      (enum)
+    InteropInitiatorType.java   (enum)
+    InteropTransactionRole.java (enum)
+    InteropTransactionScenario.java (enum)
+    InteropTransferActionType.java  (enum)
+
+fineract-provider/src/main/java/org/apache/fineract/interoperation/
+  api/
+    InteropApiResource.java       # REST controller
+  service/
+    InteropService.java           # interface
+    InteropServiceImpl.java       # implementation
+  util/
+    InteropUtil.java
+```
+
+<Note>
+Domain entities and data classes live in `fineract-savings` because they depend
+on `SavingsAccount`. The REST resource and service implementation live in
+`fineract-provider`, which has visibility into both the savings module and the
+command infrastructure.
+</Note>
+
+## InteropIdentifier
+
+The `InteropIdentifier` entity (`table: interop_identifier`) links an external
+FSP identifier to a Fineract savings account:
+
+```java
+@Entity
+@Table(name = "interop_identifier",
+    uniqueConstraints = {
+        @UniqueConstraint(name = "uk_hathor_identifier_account",
+            columnNames = { "account_id", "type" }),
+        @UniqueConstraint(name = "uk_hathor_identifier_value",
+            columnNames = { "type", "a_value", "sub_value_or_type" })
+    })
+public class InteropIdentifier extends AbstractPersistableCustom<Long> {
+
+    @ManyToOne(optional = false)
+    @JoinColumn(name = "account_id", nullable = false)
+    private SavingsAccount account;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "type", nullable = false, length = 32)
+    private InteropIdentifierType type;
+
+    @Column(name = "a_value", nullable = false, length = 128)
+    private String value;
+
+    @Column(name = "sub_value_or_type", length = 128)
+    private String subType;
+    // ... audit fields
+}
+```
+
+Each account can have at most one identifier of each `InteropIdentifierType` (enforced by `uk_hathor_identifier_account`). The same identifier value+subType combination must be globally unique across the system (`uk_hathor_identifier_value`).
+
+## Identifier Types
+
+`InteropIdentifierType` enumerates the supported FSP identifier schemes (MSISDN, email, IBAN, and others defined by the Mojaloop API specification). Each type maps one savings account to one identifier in that namespace.
+
+## Transaction Roles and Scenarios
+
+### `InteropTransactionRole`
+
+```java
+public enum InteropTransactionRole {
+    PAYER,  // withdrawal from the savings account
+    PAYEE;  // deposit to the savings account
+
+    public boolean isWithdraw() { return this == PAYER; }
+
+    public SavingsAccountTransactionType getTransactionType() {
+        return this == PAYER
+            ? SavingsAccountTransactionType.WITHDRAWAL
+            : SavingsAccountTransactionType.DEPOSIT;
+    }
+}
+```
+
+The role directly determines whether Fineract posts a `WITHDRAWAL` or a
+`DEPOSIT` to the linked savings account.
+
+### `InteropTransactionScenario`
+
+```java
+public enum InteropTransactionScenario {
+    DEPOSIT, WITHDRAWAL, TRANSFER, PAYMENT, REFUND
+}
+```
+
+### `InteropAmountType`
+
+Indicates whether the quoted amount is `SEND` (sender specifies how much to
+send) or `RECEIVE` (receiver specifies how much to receive). Used in quote
+calculations.
+
+### `InteropActionState`
+
+```java
+public enum InteropActionState {
+    ACCEPTED, REJECTED
+}
+```
+
+### `InteropTransferActionType`
+
+Distinguishes the phase of the Mojaloop transfer protocol: `PREPARE` (two-phase
+commit lock), `CREATE` (fulfilment), and `RELEASE` (abort).
+
+## REST Endpoints
+
+All endpoints are rooted at `/v1/interoperation` (`InteropApiResource`).
+
+### Account Identifiers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/accounts/{accountId}/identifiers` | List all identifiers for a savings account |
+| `GET`  | `/accounts/{accountId}` | Get account details |
+| `GET`  | `/accounts/{accountId}/transactions` | List transactions (filterable by debit/credit and date range) |
+| `GET`  | `/parties/{idType}/{idValue}` | Look up account by identifier type+value |
+| `GET`  | `/parties/{idType}/{idValue}/{subIdOrType}` | Look up with sub-type |
+| `POST` | `/parties/{idType}/{idValue}` | Register an identifier |
+| `DELETE` | `/parties/{idType}/{idValue}` | Remove an identifier |
+
+### KYC
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/accounts/{accountId}/kyc` | Retrieve KYC data for an account holder |
+
+### Quotes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/transactions/{transactionCode}/quote` | Retrieve an existing quote |
+| `POST` | `/quotes` | Create a quote (fee calculation) |
+
+### Transactions and Transfers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/transactions/{transactionCode}/requests` | Get transaction request status |
+| `POST` | `/requests` | Create a transaction request |
+| `GET`  | `/transactions/{transactionCode}/transfers` | Get transfer status |
+| `POST` | `/transfers` | Initiate a transfer (PREPARE phase) |
+| `PUT`  | `/transfers/{transactionCode}` | Commit or abort transfer (CREATE/RELEASE) |
+
+## How Interop Transactions Map to Savings Transactions
+
+The `InteropServiceImpl` translates each interoperability action into a standard Fineract savings account operation:
+
+1. **Quote (`POST /quotes`)**: Calculates fees for the proposed transfer. No funds movement; returns the agreed fee and the FX rate if applicable.
+
+2. **Transfer PREPARE (`POST /transfers`)**: Locks funds in the savings account via a reservation. This is the Mojaloop two-phase commit `PREPARE` step.
+
+3. **Transfer CREATE (`PUT /transfers/{transactionCode}`)**: Fulfils the reservation and posts either:
+   - A `WITHDRAWAL` transaction if the account is `PAYER`
+   - A `DEPOSIT` transaction if the account is `PAYEE`
+
+4. **Transfer RELEASE**: Aborts the reservation and releases locked funds without posting a transaction.
+
+The `InteropTransactionRole.getTransactionType()` method on the domain enum directly returns the `SavingsAccountTransactionType` that the service posts.
+
+## `InteropIdentifierData`
+
+The data transfer object for identifier operations:
+
+```java
+@Getter
+@AllArgsConstructor
+public class InteropIdentifierData {
+    @NotNull
+    private final InteropIdentifierType idType;
+    @NotNull
+    private final String idValue;
+    private final String subIdOrType;
+}
+```
+
+`InteropIdentifierAccountResponseData` extends this with the linked account ID, and `InteropIdentifiersResponseData` wraps a list of identifiers for the bulk-retrieve response.
+
+## `InteropAccountData`
+
+Returned by `GET /accounts/{accountId}`. Contains the account number, currency,
+current balance, and available balance. Used by the switch to validate that a
+destination account exists and is active before initiating a transfer.

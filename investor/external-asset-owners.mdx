@@ -1,0 +1,222 @@
+---
+title: "External Asset Owners and Loan Securitisation"
+sidebarTitle: "Asset Owners"
+description: "Domain model, REST API, and accounting integration for the fineract-investor module — handles loan securitisation and external asset ownership transfers."
+---
+
+The `fineract-investor` module adds loan securitisation capabilities to Fineract, allowing loans to be sold to or repurchased from external investors. The entire module is conditional on `InvestorModuleIsEnabledCondition`, which means every `@Component`, `@Service`, and REST resource within it is only registered when the investor feature flag is active. The module owns its own Liquibase changelog (`fineract-investor/src/main/resources/db/changelog/tenant/module/investor/`), COB business step, and accounting helper.
+
+<CardGroup cols={2}>
+  <Card title="Transfer Lifecycle" href="/investor/transfer-lifecycle" icon="arrows-rotate">
+    End-to-end state transitions from PENDING to ACTIVE and BUYBACK
+  </Card>
+  <Card title="DB Migrations" href="/deployment/database-migrations" icon="database">
+    Investor module ships 22 Liquibase changesets
+  </Card>
+</CardGroup>
+
+## Feature Flag
+
+All beans in `fineract-investor` are annotated with:
+
+```java
+@Conditional(InvestorModuleIsEnabledCondition.class)
+```
+
+`InvestorModuleIsEnabledCondition` is defined in
+`fineract-investor/src/main/java/org/apache/fineract/investor/config/InvestorModuleIsEnabledCondition.java`.
+The condition reads a global configuration flag; when disabled the entire module
+is absent from the Spring context. The `LoanAccountOwnerTransferConfiguration`
+class in the same package wires up the COB step only under the same condition.
+
+## Domain Entities
+
+The domain model lives in `org.apache.fineract.investor.domain`.
+
+### ExternalAssetOwner
+
+Table `m_external_asset_owner`. Represents the investor entity that holds or has held a loan. Referenced as a `@ManyToOne` from every transfer record.
+
+### ExternalAssetOwnerTransfer
+
+Table `m_external_asset_owner_transfer`. The core ledger of all ownership
+movements. Each row is an immutable history entry; rows are never updated
+in-place — instead the old row's `effective_date_to` is set and a new row is
+inserted (the *expire-and-create* pattern).
+
+Key fields sourced directly from the entity:
+
+```java
+@Table(name = "m_external_asset_owner_transfer")
+@Entity
+public class ExternalAssetOwnerTransfer extends AbstractAuditableWithUTCDateTimeCustom<Long> {
+
+    @ManyToOne
+    @JoinColumn(name = "owner_id", nullable = false)
+    private ExternalAssetOwner owner;
+
+    @OneToOne(mappedBy = "externalAssetOwnerTransfer", cascade = CascadeType.ALL)
+    private ExternalAssetOwnerTransferDetails externalAssetOwnerTransferDetails;
+
+    @Column(name = "external_id", length = 100, nullable = false)
+    private ExternalId externalId;
+
+    @Enumerated(EnumType.STRING)
+    private ExternalTransferStatus status;
+
+    @Enumerated(EnumType.STRING)
+    private ExternalTransferSubStatus subStatus;
+
+    // Stored as a plain String, e.g. "1.0" meaning par value
+    @Column(name = "purchase_price_ratio", length = 50, nullable = false)
+    private String purchasePriceRatio;
+
+    @Column(name = "settlement_date", nullable = false)
+    private LocalDate settlementDate;
+
+    @Column(name = "effective_date_from", nullable = false)
+    private LocalDate effectiveDateFrom;
+
+    // Open rows use the sentinel date 9999-12-31
+    @Column(name = "effective_date_to", nullable = false)
+    private LocalDate effectiveDateTo;
+
+    @Column(name = "loan_id", nullable = false)
+    private Long loanId;
+
+    @Column(name = "external_loan_id", length = 100)
+    private ExternalId externalLoanId;
+}
+```
+
+### ExternalAssetOwnerTransferDetails
+
+Table `m_external_asset_owner_transfer_details`. A `@OneToOne` child of
+`ExternalAssetOwnerTransfer` populated at settlement time by
+`LoanAccountOwnerTransferBusinessStep.createAssetOwnerTransferDetails()`. Stores
+outstanding balances at the moment of transfer:
+
+- `totalPrincipalOutstanding`
+- `totalInterestOutstanding` (strategy-calculated — see `ExternalAssetOwnerTransferOutstandingInterestCalculation`)
+- `totalFeeChargesOutstanding`
+- `totalPenaltyChargesOutstanding`
+- `totalOverpaid`
+
+### ExternalAssetOwnerTransferLoanMapping
+
+Table `m_external_asset_owner_transfer_loan_mapping`. A live mapping that exists
+only while a transfer has `ACTIVE` or `ACTIVE_INTERMEDIATE` status. When a loan
+returns to Fineract (buyback) or when a subsequent sale supersedes the current
+owner, the mapping row is deleted. Used to answer "who owns this loan right now?"
+efficiently.
+
+## Status Enums
+
+### ExternalTransferStatus
+
+```java
+public enum ExternalTransferStatus {
+    ACTIVE,               // loan is currently held by the external investor
+    ACTIVE_INTERMEDIATE,  // two-hop: sold to intermediary, not yet to final investor
+    DECLINED,             // COB refused the sale (e.g. loan was closed)
+    PENDING,              // sale requested, awaiting COB settlement
+    PENDING_INTERMEDIATE, // two-hop: awaiting intermediary settlement
+    BUYBACK,              // repurchase requested, awaiting COB settlement
+    BUYBACK_INTERMEDIATE, // two-hop: buyback from intermediary pending
+    CANCELLED             // same-day sale+buyback, or buyback of an unsold loan
+}
+```
+
+The open-record sentinel date `9999-12-31` on `effective_date_to` marks any row
+that is currently "live" (ACTIVE / PENDING / BUYBACK). All history rows have a
+concrete past date.
+
+### ExternalTransferSubStatus
+
+```java
+public enum ExternalTransferSubStatus {
+    BALANCE_ZERO,      // DECLINED: outstanding balance is zero
+    BALANCE_NEGATIVE,  // DECLINED: balance is negative (overpaid)
+    SAMEDAY_TRANSFERS, // CANCELLED: both a sale and buyback arrived on the same business date
+    USER_REQUESTED,    // CANCELLED: user explicitly cancelled via API
+    UNSOLD             // CANCELLED: buyback arrived before the sale was ever settled
+}
+```
+
+## REST API
+
+Base path: `POST /v1/external-asset-owners/transfers/…`
+
+Implemented in `ExternalAssetOwnersApiResource`
+(`fineract-investor/src/main/java/org/apache/fineract/investor/api/`).
+All write operations are dispatched through the standard Fineract command
+framework (`PortfolioCommandSourceWritePlatformService`) using the `?command=`
+query parameter.
+
+| HTTP | Path | `?command=` | Write method |
+|------|------|-------------|--------------|
+| POST | `/transfers/loans/{loanId}` | `sale` | `saleLoanByLoanId` |
+| POST | `/transfers/loans/{loanId}` | `intermediarySale` | `intermediarySaleLoanByLoanId` |
+| POST | `/transfers/loans/{loanId}` | `buyback` | `buybackLoanByLoanId` |
+| POST | `/transfers/loans/external-id/{loanExternalId}` | `sale` / `buyback` | same, by external ID |
+| POST | `/transfers/{id}` | `cancel` | `cancelTransactionById` |
+| POST | `/transfers/external-id/{externalId}` | `cancel` | `cancelTransactionById` |
+| GET  | `/transfers/loans/{loanId}` | — | read transfers for a loan |
+| GET  | `/transfers/{id}` | — | read a single transfer |
+
+Write operations are defined in `ExternalAssetOwnersWriteService`:
+
+```java
+public interface ExternalAssetOwnersWriteService {
+    CommandProcessingResult intermediarySaleLoanByLoanId(JsonCommand jsonCommand);
+    CommandProcessingResult saleLoanByLoanId(JsonCommand command);
+    CommandProcessingResult buybackLoanByLoanId(JsonCommand command);
+    CommandProcessingResult cancelTransactionById(JsonCommand command);
+    CommandProcessingResult createExternalAssetOwner(JsonCommand command);
+}
+```
+
+The request body is `ExternalAssetOwnerRequest` and must include at minimum the
+`ownerExternalId`, `settlementDate`, and `purchasePriceRatio` fields.
+
+## Accounting Integration
+
+`InvestorAccountingHelper`
+(`fineract-investor/src/main/java/org/apache/fineract/investor/accounting/journalentry/service/`)
+creates GL journal entries on every ownership change. It uses the
+`INVESTOR_TRANSFER_IDENTIFIER = "I"` prefix to tag investor-related entries
+apart from ordinary loan transactions. Journal entries are posted via
+`LoanJournalEntryPoster.postJournalEntriesForExternalOwnerTransfer()` at
+settlement time inside `LoanAccountOwnerTransferBusinessStep`.
+
+Entries are linked to the transfer via `ExternalAssetOwnerTransferJournalEntryMapping`
+and to individual journal entries via `ExternalAssetOwnerJournalEntryMapping`.
+
+## COB Integration
+
+`LoanAccountOwnerTransferBusinessStep` (package `org.apache.fineract.investor.cob.loan`)
+is registered in the Close-of-Business pipeline under the enum-styled name
+`EXTERNAL_ASSET_OWNER_TRANSFER`. During each COB run the step:
+
+1. Queries `m_external_asset_owner_transfer` for rows matching the current business date and a `PENDING` / `BUYBACK` status with `effective_date_to = 9999-12-31`.
+2. For a single PENDING transfer → calls `sellAssetOrDecline()`, which validates via `LoanTransferabilityService`, creates an ACTIVE row, creates the loan mapping, posts journal entries, and fires `LoanOwnershipTransferBusinessEvent`.
+3. For a single BUYBACK transfer → calls `buybackAsset()`, expires the ACTIVE row, deletes the loan mapping, posts reversal journal entries.
+4. For a same-day PENDING + BUYBACK pair → cancels both with sub-status `SAMEDAY_TRANSFERS`.
+
+<Warning>
+The COB step throws `IllegalStateException` if it encounters inconsistent state
+(e.g. `ACTIVE_INTERMEDIATE` expected but missing, or delayed settlement enabled
+with two transfers on the same day). These are programming errors, not
+user-recoverable conditions.
+</Warning>
+
+## ExternalAssetOwnerLoanProductAttributes
+
+`ExternalAssetOwnerLoanProductAttributes` (domain entity, table
+`m_external_asset_owner_loan_product_attributes`) stores per-loan-product
+attributes such as which settlement model applies. Managed via
+`ExternalAssetOwnerLoanProductAttributesApiResource` at
+`/v1/external-asset-owner-loan-product-attributes`.
+
+The `AttributeKey` enum and `SettlementModelExternalAssetOwnerLoanProductAttribute`
+data class represent the configurable keys.

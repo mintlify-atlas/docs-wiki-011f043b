@@ -1,0 +1,377 @@
+---
+title: "Progressive Loans: EMI Calculation & Advanced Payment Processing"
+sidebarTitle: "Progressive Loans"
+description: "Actuarial EMI model, ProgressiveLoanInterestScheduleModel, AdvancedPaymentScheduleTransactionProcessor, capitalized income, and buy-down fees in fineract-progressive-loan."
+---
+
+The `fineract-progressive-loan` module implements an actuarial (progressive) loan schedule where each installment is a fixed EMI — principal grows and interest shrinks over the loan term. This contrasts with flat-interest loans where interest is a fixed amount per period regardless of outstanding balance. Progressive loans use a live in-memory interest schedule model that is replayed from scratch on every transaction, ensuring mathematical consistency even when disbursements, rate changes, or repayments happen mid-period.
+
+<CardGroup cols={2}>
+  <Card title="Loan Accounts" icon="file-invoice-dollar" href="/loan/loan-accounts">
+    The Loan entity, status machine, and transaction processor interface
+  </Card>
+  <Card title="Loan Products" icon="box" href="/loan/loan-products">
+    Payment and credit allocation rules configured on the product
+  </Card>
+</CardGroup>
+
+---
+
+## Module layout
+
+All sources live under `fineract-progressive-loan/src/main/java/org/apache/fineract/`:
+
+| Package | Key classes |
+|---|---|
+| `portfolio.loanproduct.calc` | `EMICalculator` (interface), `ProgressiveEMICalculator` (implementation) |
+| `portfolio.loanproduct.calc.data` | `ProgressiveLoanInterestScheduleModel`, `RepaymentPeriod`, `InterestPeriod`, `InterestRate`, `PeriodDueDetails`, `OutstandingDetails` |
+| `portfolio.loanaccount.domain.transactionprocessor.impl` | `AdvancedPaymentScheduleTransactionProcessor`, `ProgressiveTransactionCtx`, `ChangeOperation` |
+| `portfolio.loanaccount.loanschedule.domain` | `ProgressiveLoanScheduleGenerator` |
+| `portfolio.loanaccount.loanschedule.data` | `LoanSchedulePlan`, `LoanSchedulePlanRepaymentPeriod`, `LoanSchedulePlanDisbursementPeriod` |
+| `portfolio.loanaccount.domain` | `ProgressiveLoanModel`, `LoanCapitalizedIncomeBalance`, `LoanBuyDownFeeBalance` |
+| `portfolio.loanaccount.service` | `BuyDownFeePlatformService`, `CapitalizedIncomeBalanceServiceImpl`, `InterestScheduleModelRepositoryWrapper` |
+| `portfolio.loanaccount.api` | `LoanBuyDownFeeApiResource`, `LoanCapitalizedIncomeApiResource` |
+| `portfolio.loanaccount.handler` | `AddCapitalizedIncomeCommandHandler`, `AddBuyDownFeeCommandHandler`, `CapitalizedIncomeAdjustmentCommandHandler`, `BuyDownFeeAdjustmentCommandHandler` |
+
+---
+
+## Progressive vs. flat-interest loans
+
+| Dimension | Flat interest | Progressive (actuarial) |
+|---|---|---|
+| Interest calculation | Total interest = P × r × n; split equally | Recalculated each period on declining balance |
+| EMI | Varies if principal changes | Constant (Equal Installments amortization) |
+| Prepayment impact | Static schedule | Full schedule replay from prepayment date |
+| Interest model | None (formula) | `ProgressiveLoanInterestScheduleModel` live object |
+| Transaction processor | `FineractStyleLoanRepaymentScheduleTransactionProcessor` (or similar) | `AdvancedPaymentScheduleTransactionProcessor` |
+| Schedule type | `CUMULATIVE` | `PROGRESSIVE` |
+
+<Note>
+A product must set `AmortizationMethod.EQUAL_INSTALLMENTS`, `InterestMethod.DECLINING_BALANCE`, and `LoanScheduleType.PROGRESSIVE` to use this module. The product validator enforces this combination.
+</Note>
+
+---
+
+## `EMICalculator` interface
+
+`EMICalculator` is the central SPI for all progressive calculation operations. The single production implementation is `ProgressiveEMICalculator`.
+
+```java
+// fineract-progressive-loan/…/loanproduct/calc/EMICalculator.java
+public interface EMICalculator {
+
+    ProgressiveLoanInterestScheduleModel generatePeriodInterestScheduleModel(
+        @NotNull List<LoanScheduleModelRepaymentPeriod> periods,
+        @NotNull ILoanConfigurationDetails loanProductRelatedDetail,
+        Integer installmentAmountInMultiplesOf, MathContext mc);
+
+    ProgressiveLoanInterestScheduleModel generateInstallmentInterestScheduleModel(
+        @NotNull List<RepaymentScheduleInstallmentData> installments,
+        @NotNull ILoanConfigurationDetails loanProductRelatedDetail,
+        Integer installmentAmountInMultiplesOf, MathContext mc);
+
+    void addDisbursement(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate disbursementDueDate, Money disbursedAmount);
+
+    void addCapitalizedIncome(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate transactionDueDate, Money transactionAmount);
+
+    void changeInterestRate(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate newInterestSubmittedOnDate, BigDecimal newInterestRate);
+
+    void addBalanceCorrection(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate balanceCorrectionDate, Money balanceCorrectionAmount);
+
+    void payInterest(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate repaymentPeriodFromDate, LocalDate repaymentPeriodDueDate,
+        LocalDate transactionDate, Money interestAmount);
+
+    void payPrincipal(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate repaymentPeriodFromDate, LocalDate repaymentPeriodDueDate,
+        LocalDate transactionDate, Money principalAmount);
+
+    void creditPrincipal(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate transactionDate, Money creditedPrincipalAmount);
+
+    void creditInterest(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate transactionDate, Money creditedInterestAmount);
+
+    @NotNull
+    PeriodDueDetails getDueAmounts(
+        @NotNull ProgressiveLoanInterestScheduleModel scheduleModel,
+        @NotNull LocalDate periodFromDate, @NotNull LocalDate periodDueDate,
+        @NotNull LocalDate targetDate);
+
+    @NotNull
+    Money getPeriodInterestTillDate(
+        @NotNull ProgressiveLoanInterestScheduleModel scheduleModel,
+        @NotNull LocalDate periodFromDate, @NotNull LocalDate periodDueDate,
+        @NotNull LocalDate targetDate, boolean includeChargebackInterest,
+        boolean fixedInterestTillDate);
+
+    boolean recalculateModelOverdueAmountsTillDate(
+        ProgressiveLoanInterestScheduleModel ctx, LocalDate targetDate,
+        boolean prepayAttempt);
+
+    void applyInterestPause(ProgressiveLoanInterestScheduleModel scheduleModel,
+        LocalDate fromDate, LocalDate endDate);
+
+    // ... re-age, re-amortization, rate factor helpers
+}
+```
+
+### EMI calculation flow
+
+```mermaid
+flowchart TD
+    A[ProgressiveLoanScheduleGenerator.generate()] --> B[EMICalculator.generatePeriodInterestScheduleModel()]
+    B --> C[ProgressiveLoanInterestScheduleModel created\n with RepaymentPeriod list]
+    C --> D[EMICalculator.addDisbursement()]
+    D --> E[Rate factor recalculated\n for each RepaymentPeriod]
+    E --> F[EMI = Outstanding / annuity factor\n rounded to installmentAmountInMultiplesOf]
+    F --> G[LoanScheduleModel returned\n → persisted as m_loan_repayment_schedule]
+
+    G --> H{Transaction arrives}
+    H --> I[AdvancedPaymentScheduleTransactionProcessor\n.processLatestTransaction()]
+    I --> J[EMICalculator.payPrincipal / payInterest\n / addBalanceCorrection]
+    J --> K[Model updated → ChangedTransactionDetail returned\n → schedule rows updated]
+```
+
+---
+
+## `ProgressiveLoanInterestScheduleModel`
+
+This in-memory model is the single source of truth for a progressive loan's interest state:
+
+```java
+// fineract-progressive-loan/…/loanproduct/calc/data/ProgressiveLoanInterestScheduleModel.java
+@Data @Accessors(fluent = true) @AllArgsConstructor
+public class ProgressiveLoanInterestScheduleModel {
+
+    private final List<RepaymentPeriod> repaymentPeriods;
+    private final TreeSet<InterestRate> interestRates;  // ordered descending by effective date
+
+    @JsonExclude
+    private final ILoanConfigurationDetails loanProductRelatedDetail;
+    private final Integer installmentAmountInMultiplesOf;
+
+    @JsonExclude
+    private final MathContext mc;
+    @JsonExclude
+    private final Money zero;
+
+    private final Map<LoanInterestScheduleModelModifiers, Boolean> modifiers;
+
+    private LocalDate lastOverdueBalanceChange;
+    private List<OverdueBalanceCorrection> overdueCorrections;
+    // ...
+}
+```
+
+`LoanInterestScheduleModelModifiers` flags include `COPY`, `EMI_RECALCULATION`, `INTEREST_PAUSE_FOR_EMI_CALCULATION`, `INTEREST_RECALCULATION_ENABLED`.
+
+### `RepaymentPeriod`
+
+Each element of `repaymentPeriods` represents one installment slot:
+
+```java
+// fineract-progressive-loan/…/loanproduct/calc/data/RepaymentPeriod.java
+public class RepaymentPeriod {
+    private LocalDate fromDate;
+    private LocalDate dueDate;
+    private List<InterestPeriod> interestPeriods;
+    private Money emi;
+    private Money originalEmi;
+    private Money paidPrincipal;
+    private Money paidInterest;
+    private Money futureUnrecognizedInterest;
+    private boolean isInterestMovedUpward;
+    // Memo-cached calculations: rateFactorPlus1, calculatedDueInterest, dueInterest, outstandingBalance
+}
+```
+
+`InterestPeriod` breaks a repayment period into sub-segments, each with its own outstanding principal and interest rate. This supports mid-period disbursements and rate changes without approximation.
+
+---
+
+## `AdvancedPaymentScheduleTransactionProcessor`
+
+This processor extends `AbstractLoanRepaymentScheduleTransactionProcessor` and is selected when `transactionProcessingStrategyCode` equals `"advanced-payment-allocation"`. It lives in `fineract-progressive-loan/…/transactionprocessor/impl/`.
+
+Key responsibilities:
+
+1. **Chronological replay** — all loan transactions are sorted and replayed in order; each call to `reprocessLoanTransactions` rebuilds the full `ProgressiveLoanInterestScheduleModel` from the disbursement date.
+2. **Allocation by rule** — uses `LoanPaymentAllocationRule` (or the product default) to determine in which order `PENALTY → FEE → INTEREST → PRINCIPAL` components are satisfied.
+3. **Future installment strategy** — `FutureInstallmentAllocationRule` (`NEXT_INSTALLMENT`, `LAST_INSTALLMENT`, `REAMORTIZATION`) controls whether overpayment is applied to the next due installment, prepays the last, or triggers re-amortization.
+4. **Chargeback** — uses `LoanCreditAllocationRule` to credit components back in the configured order.
+5. **Interest pause** — delegates to `EMICalculator.applyInterestPause()` when a pause range is active.
+
+### `ProgressiveTransactionCtx`
+
+The context object passed through transaction processing:
+
+```java
+// fineract-progressive-loan/…/transactionprocessor/impl/ProgressiveTransactionCtx.java
+public class ProgressiveTransactionCtx extends TransactionCtx {
+    private ProgressiveLoanInterestScheduleModel interestScheduleModel;
+    // ...
+}
+```
+
+The model is materialized once per `reprocessLoanTransactions` call and threaded through all per-transaction operations. After processing, the model snapshot is serialized to JSON and persisted in `ProgressiveLoanModel`.
+
+---
+
+## Payment Allocation Rules
+
+Rules are configured on the product (see [Loan Products](/loan/loan-products)) and copied to the loan at origination.
+
+| `PaymentAllocationTransactionType` | When applied |
+|---|---|
+| `DEFAULT` | Fallback for any transaction type without a specific rule |
+| `REPAYMENT` | Standard customer repayment |
+| `DOWN_PAYMENT` | Initial down-payment transaction at disbursement |
+| `MERCHANT_ISSUED_REFUND` | Merchant-initiated credit |
+| `PAYOUT_REFUND` | Payout refund from external channel |
+| `GOODWILL_CREDIT` | Operational credit to customer |
+| `CHARGE_REFUND` | Refund of a previously paid charge |
+| `CHARGE_ADJUSTMENT` | Adjustment to charge amount |
+
+`FutureInstallmentAllocationRule` values:
+
+| Value | Behaviour |
+|---|---|
+| `NEXT_INSTALLMENT` | Excess applied to the soonest upcoming installment |
+| `LAST_INSTALLMENT` | Excess prepays the last installment first |
+| `REAMORTIZATION` | Outstanding balance redistributed across remaining periods, EMI recalculated |
+
+---
+
+## Credit Allocation Rules
+
+Credit allocation governs chargebacks — how a reversed transaction's components are credited back:
+
+```java
+// fineract-loan/…/domain/LoanCreditAllocationRule.java
+@Table(name = "m_loan_credit_allocation_rule")
+public class LoanCreditAllocationRule {
+    private Loan loan;
+    private CreditAllocationTransactionType transactionType; // CHARGEBACK
+    private List<AllocationType> allocationTypes; // e.g. [PENALTY, FEE, INTEREST, PRINCIPAL]
+}
+```
+
+On a chargeback, `AdvancedPaymentScheduleTransactionProcessor` iterates `allocationTypes` in order and calls `EMICalculator.creditPrincipal` / `creditInterest` accordingly.
+
+---
+
+## Capitalized income
+
+Capitalized income lets upfront fees be folded into loan principal so they are amortized over the loan life instead of collected at disbursement.
+
+### `LoanCapitalizedIncomeBalance`
+
+```java
+// fineract-progressive-loan/…/domain/LoanCapitalizedIncomeBalance.java
+@Entity @Table(name = "m_loan_capitalized_income_balance")
+public class LoanCapitalizedIncomeBalance {
+    private Loan loan;
+    private LoanTransaction loanTransaction;
+    private BigDecimal amount;
+    private LocalDate date;
+    private BigDecimal unrecognizedAmount;
+    private BigDecimal chargedOffAmount;
+    private BigDecimal amountAdjustment;
+    private boolean deleted;
+    private boolean closed;
+}
+```
+
+When a capitalized income transaction is posted:
+
+1. `AddCapitalizedIncomeCommandHandler` routes to `CapitalizedIncomeWritePlatformServiceImpl`.
+2. A `LoanCapitalizedIncomeBalance` row is created.
+3. `AdvancedPaymentScheduleTransactionProcessor` calls `EMICalculator.addCapitalizedIncome()`, which increases the outstanding balance and recalculates all future EMIs from the transaction date.
+
+The `unrecognizedAmount` field tracks income not yet recognized as the balance amortizes. REST surface: `POST /v1/loans/{loanId}/capitalized-income`.
+
+---
+
+## Buy-down fees
+
+Buy-down fees reduce the effective interest rate at origination — the originator pays an upfront fee, and the platform amortizes it over the loan life as deferred income.
+
+### `LoanBuyDownFeeBalance`
+
+```java
+// fineract-progressive-loan/…/domain/LoanBuyDownFeeBalance.java
+@Entity @Table(name = "m_loan_buy_down_fee_balance")
+public class LoanBuyDownFeeBalance {
+    private Loan loan;
+    private LoanTransaction loanTransaction;
+    private BigDecimal amount;
+    private LocalDate date;
+    private BigDecimal unrecognizedAmount;
+    private BigDecimal chargedOffAmount;
+    private BigDecimal amountAdjustment;
+    private boolean deleted;
+    private boolean closed;
+}
+```
+
+Product-level buy-down configuration uses `LoanBuyDownFeeStrategy`, `LoanBuyDownFeeCalculationType`, and `LoanBuyDownFeeIncomeType` enums (defined in `fineract-loan/…/domain/`). REST surface: `POST /v1/loans/{loanId}/buy-down-fee`. The amortization schedule detail is readable via `BuyDownFeeAmortizationDetails` in the read service.
+
+---
+
+## `ProgressiveLoanModel` persistence
+
+The full `ProgressiveLoanInterestScheduleModel` is serialized to JSON and persisted after each transaction reprocess cycle:
+
+```java
+// fineract-progressive-loan/…/domain/ProgressiveLoanModel.java
+@Entity @Table(name = "m_loan_progressive_model")
+public class ProgressiveLoanModel extends AbstractPersistableCustom<Long> {
+
+    @Version int version;
+
+    @OneToOne
+    @JoinColumn(name = "loan_id", nullable = false)
+    private Loan loan;
+
+    @Column(name = "json_model", columnDefinition = "text", nullable = false)
+    private String jsonModel;
+
+    @Column(name = "business_date", nullable = false)
+    private LocalDate businessDate;
+
+    @Column(name = "last_modified_on_utc", nullable = false)
+    private OffsetDateTime lastModifiedDate;
+
+    @Column(name = "json_model_version", nullable = false)
+    private String jsonModelVersion;
+}
+```
+
+`jsonModelVersion` is currently `"2"` (see `ProgressiveLoanInterestScheduleModel.modelVersion`). When reading a stored model, `InterestScheduleModelRepositoryWrapper` deserializes the JSON back into a `ProgressiveLoanInterestScheduleModel`. A version mismatch triggers a full re-generation from installments via `generateInstallmentInterestScheduleModel`.
+
+<Warning>
+`m_loan_progressive_model` has a `@Version` optimistic lock. If two COB steps or API calls try to update the same loan's model concurrently, one will receive an `ObjectOptimisticLockingFailureException`. The COB infrastructure handles retries.
+</Warning>
+
+---
+
+## `ProgressiveLoanScheduleGenerator`
+
+`ProgressiveLoanScheduleGenerator` implements `LoanScheduleGenerator` and is selected when `loanScheduleType == PROGRESSIVE`:
+
+```java
+// fineract-progressive-loan/…/loanschedule/domain/ProgressiveLoanScheduleGenerator.java
+@Component
+public class ProgressiveLoanScheduleGenerator implements LoanScheduleGenerator {
+    // Injects EMICalculator, InterestScheduleModelRepositoryWrapper, LoanTransactionProcessingService
+}
+```
+
+It calls `EMICalculator.generatePeriodInterestScheduleModel()` to build the initial model, applies any existing disbursements, then serializes installments into `LoanScheduleModelRepaymentPeriod` objects. For rescheduling, it delegates to `AdvancedPaymentScheduleTransactionProcessor` after rebuilding the model.
+
+`LoanSchedulePlan` and its sub-types (`LoanSchedulePlanRepaymentPeriod`, `LoanSchedulePlanDisbursementPeriod`, `LoanSchedulePlanDownPaymentPeriod`) are lightweight projections returned by the schedule generator for API preview responses.

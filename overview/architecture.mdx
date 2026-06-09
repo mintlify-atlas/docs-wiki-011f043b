@@ -1,0 +1,201 @@
+---
+title: "Fineract System Architecture and Request Flow"
+sidebarTitle: "Architecture"
+description: "Layered architecture diagram, Spring Boot bootstrap, key design patterns, module dependency graph, and annotated sequence diagram for a write request."
+---
+
+Fineract is a layered Spring Boot application whose design centres on three cross-cutting concerns: **multi-tenancy** (every request is scoped to an isolated tenant datasource), **CQRS-style command dispatch** (all writes flow through a `CommandDispatcher` pipeline), and **domain event emission** (every significant state change raises a typed `BusinessEvent` that can be forwarded to external brokers). Understanding these three pillars lets you navigate any feature area quickly.
+
+## High-Level Architecture
+
+```mermaid
+flowchart TD
+    subgraph Clients
+        A[Mobile App / Web UI]
+        B[Integration / API Client]
+    end
+
+    subgraph REST_Layer["REST Layer (fineract-provider, domain modules)"]
+        C[JAX-RS Resources\n@Path /api/v1/...]
+    end
+
+    subgraph Security["Security Filter Chain (fineract-security)"]
+        D[TenantAwareBasicAuthenticationFilter\nor TenantAwareAuthenticationFilter]
+        E[TwoFactorAuthenticationFilter]
+        F[BusinessDateFilter]
+    end
+
+    subgraph Command["Command Pipeline (fineract-command, *-jdbc, *-async, *-disruptor)"]
+        G[CommandDispatcher]
+        H[CommandHookManager\npre / post / error]
+        I[CommandHandlerManager]
+        J[CommandStore\n→ m_command table]
+    end
+
+    subgraph Domain["Domain Modules (fineract-loan, fineract-savings, fineract-accounting …)"]
+        K[CommandHandler impl]
+        L[Domain Service]
+        M[JPA Repository]
+    end
+
+    subgraph Events["Event Layer"]
+        N[BusinessEventNotifierService]
+        O[ExternalEventService\n→ m_external_event]
+        P[ExternalEventProducer\nKafka / JMS]
+    end
+
+    A --> C
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> K
+    K --> L
+    L --> M
+    L --> N
+    N --> O
+    O --> P
+```
+
+## Spring Boot Bootstrap
+
+`ServerApplication` (in `fineract-provider`) is the application entry point. It delegates configuration loading to two nested configuration classes via `@Import`:
+
+```java
+// fineract-provider/.../ServerApplication.java
+@Import({ FineractWebApplicationConfiguration.class,
+          FineractLiquibaseOnlyApplicationConfiguration.class })
+private static final class Configuration {}
+
+public static void main(String[] args) throws IOException {
+    configureApplication(new SpringApplicationBuilder(ServerApplication.class)).run(args);
+}
+```
+
+- `FineractWebApplicationConfiguration` — activates the full web stack: security, JPA, Jersey (JAX-RS), scheduling, caching.
+- `FineractLiquibaseOnlyApplicationConfiguration` — a lighter mode used for schema-only migration runs (no web context).
+
+Auto-configuration for the command subsystem is triggered via `CommandAutoConfiguration` in `fineract-command`, `JdbcCommandAutoConfiguration` in `fineract-command-jdbc`, and their equivalents for the async and disruptor variants.
+
+## Key Architectural Patterns
+
+### Multi-Tenancy: Per-Request Datasource Switching
+
+Every HTTP request must carry the `Fineract-Platform-TenantId` header (or `tenantIdentifier` query parameter). `TenantAwareBasicAuthenticationFilter` (Basic Auth mode) calls `AuthTenantDetailsService.loadTenantById(tenantIdentifier, ...)` which resolves a `FineractPlatformTenant` record from the shared tenant metadata database and stores it in `ThreadLocalContextUtil`. All JPA repositories transparently use the tenant-scoped `DataSource` for the lifetime of that request thread.
+
+```java
+// TenantAwareBasicAuthenticationFilter.doFilterInternal(...)
+String tenantIdentifier = request.getHeader("Fineract-Platform-TenantId");
+final FineractPlatformTenant tenant =
+    basicAuthTenantDetailsService.loadTenantById(tenantIdentifier, isReportRequest);
+ThreadLocalContextUtil.setTenant(tenant);
+```
+
+### CQRS Command Dispatch
+
+All write operations follow a command object pattern. A REST resource constructs a typed payload, wraps it in a `Command<T>`, and hands it to `CommandDispatcher.dispatch(command)`. The default `SynchronousCommandDispatcher` sequences pre-hooks → handler → post-hooks in the calling thread. See [Command System](/core/command-system) for full details.
+
+### Layered Domain Modules
+
+Each domain area (loan, savings, accounting, etc.) is structured as:
+
+```
+api/          JAX-RS resource (@Path)
+service/      Read and write platform service interfaces
+domain/       JPA entities and repositories
+data/         DTOs / API data classes
+handler/      CommandHandler implementations
+exception/    Domain-specific exceptions
+mapper/       MapStruct entity→DTO mappers
+```
+
+This layering keeps concerns separated and prevents domain logic from leaking into REST resources.
+
+## Module Dependency Graph
+
+```mermaid
+graph LR
+    fineract-avro-schemas --> fineract-core
+    fineract-core --> fineract-security
+    fineract-core --> fineract-command
+    fineract-command --> fineract-command-jdbc
+    fineract-command --> fineract-command-async
+    fineract-command --> fineract-command-disruptor
+    fineract-command --> fineract-command-audit
+    fineract-core --> fineract-accounting
+    fineract-core --> fineract-loan
+    fineract-core --> fineract-savings
+    fineract-core --> fineract-cob
+    fineract-loan --> fineract-progressive-loan
+    fineract-core --> fineract-charge
+    fineract-core --> fineract-tax
+    fineract-core --> fineract-investor
+    fineract-core --> fineract-rates
+    fineract-core --> fineract-branch
+    fineract-security --> fineract-provider
+    fineract-accounting --> fineract-provider
+    fineract-loan --> fineract-provider
+    fineract-savings --> fineract-provider
+    fineract-cob --> fineract-provider
+    fineract-command-jdbc --> fineract-provider
+    fineract-command-audit --> fineract-provider
+    fineract-provider --> fineract-war
+```
+
+<Note>
+`fineract-provider` is the assembly module: it contains the `ServerApplication` main class and pulls in nearly every domain module. Keeping business logic out of `fineract-provider` and inside the appropriate domain module is the intended contribution pattern.
+</Note>
+
+## Write Request Sequence Diagram
+
+The diagram below traces a typical write call — for example, `POST /api/v1/loans/{loanId}/transactions` — from HTTP ingress through to event emission.
+
+```mermaid
+sequenceDiagram
+    participant C as HTTP Client
+    participant SF as TenantAwareBasicAuthenticationFilter
+    participant BF as BusinessDateFilter
+    participant RR as JAX-RS Resource
+    participant CD as SynchronousCommandDispatcher
+    participant HM as CommandHookManager
+    participant CH as CommandHandler
+    participant DS as Domain Service
+    participant JPA as JPA Repository
+    participant EN as BusinessEventNotifierService
+    participant EE as ExternalEventService
+    participant P as ExternalEventProducer (Kafka/JMS)
+
+    C->>SF: POST /api/v1/loans/1/transactions\nFineract-Platform-TenantId: default\nAuthorization: Basic ...
+    SF->>SF: loadTenantById("default")\nset ThreadLocalContextUtil.tenant
+    SF->>BF: filterChain.doFilter()
+    BF->>BF: set business dates in ThreadLocal
+    BF->>RR: filterChain.doFilter()
+    RR->>RR: parse JSON body, build payload
+    RR->>CD: dispatch(Command<LoanTransactionCommand>)
+    CD->>HM: hookManager.before(command)
+    Note over HM: ServletHeadersHook: extract IP, Idempotency-Key<br/>TimestampHook: set createdAt<br/>UsernameHook: set initiatedByUsername
+    HM->>CH: handlerManager.handle(command)
+    CH->>DS: loanTransactionService.makeRepayment(...)
+    DS->>JPA: save(LoanTransaction)
+    DS->>EN: notifyPostBusinessEvent(LoanRepaymentEvent)
+    EN->>EE: postEvent(LoanRepaymentEvent)
+    EE->>EE: serialize to Avro, save ExternalEvent to m_external_event
+    EE-->>EN: saved
+    EN-->>DS: listeners notified
+    DS-->>CH: CommandProcessingResult
+    CH-->>CD: result
+    CD->>HM: hookManager.after(command, result)
+    Note over HM: AuditHook: persist audit entry
+    HM-->>CD: done
+    CD-->>RR: Supplier<result>
+    RR-->>C: 200 OK { commandId, resourceId, ... }
+    P->>EE: (async) SendAsynchronousEventsTasklet polls m_external_event
+    P->>P: publish Avro bytes to Kafka topic
+```
+
+<Tip>
+The `ExternalEventProducer` does **not** publish inline during the request. `ExternalEventService.postEvent()` persists the serialized Avro payload to the `m_external_event` table within the same transaction. A separate Spring Batch tasklet (`SendAsynchronousEventsTasklet`) polls that table and dispatches to Kafka or JMS, providing at-least-once delivery without blocking the HTTP thread.
+</Tip>

@@ -1,72 +1,117 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Apache Fineract",
+  "theme": "maple",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#c35696",
+    "light": "#1d5e8b",
+    "dark": "#faf6fa"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
+  "favicon": "https://media.brand.dev/cbc27f91-fd3b-452d-89c7-5e7ded5150f3.jpg",
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/mintlify/fineract"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/mintlify/fineract"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "overview/introduction",
+              "overview/architecture",
+              "overview/module-map"
+            ]
+          },
+          {
+            "group": "Core Infrastructure",
+            "pages": [
+              "core/fineract-core",
+              "core/command-system",
+              "core/event-system",
+              "core/security"
+            ]
+          },
+          {
+            "group": "Loan Domain",
+            "pages": [
+              "loan/loan-accounts",
+              "loan/loan-products",
+              "loan/progressive-loan",
+              "loan/delinquency",
+              "loan/origination"
+            ]
+          },
+          {
+            "group": "Savings Domain",
+            "pages": [
+              "savings/savings-accounts",
+              "savings/deposit-products",
+              "savings/share-accounts"
+            ]
+          },
+          {
+            "group": "Accounting",
+            "pages": [
+              "accounting/general-ledger",
+              "accounting/journal-entries",
+              "accounting/provisioning"
+            ]
+          },
+          {
+            "group": "Batch & COB",
+            "pages": [
+              "batch/cob-framework",
+              "batch/cob-loan-steps",
+              "batch/scheduled-jobs"
+            ]
+          },
+          {
+            "group": "Platform Services",
+            "pages": [
+              "platform/multi-tenancy",
+              "platform/organisation",
+              "platform/user-administration",
+              "platform/reporting",
+              "platform/bulk-import"
+            ]
+          },
+          {
+            "group": "Investor & Asset Transfer",
+            "pages": [
+              "investor/external-asset-owners",
+              "investor/transfer-lifecycle"
+            ]
+          },
+          {
+            "group": "Integration & Clients",
+            "pages": [
+              "integration/java-client-sdk",
+              "integration/avro-event-schemas",
+              "integration/interoperability"
+            ]
+          },
+          {
+            "group": "Build & Deployment",
+            "pages": [
+              "deployment/build-system",
+              "deployment/docker-compose",
+              "deployment/kubernetes",
+              "deployment/database-migrations",
+              "deployment/configuration"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,0 +1,132 @@
+---
+title: "Fineract Gradle Module Map and Dependencies"
+sidebarTitle: "Module Map"
+description: "Complete table of all Gradle submodules with purpose, key packages, dependencies, and build configuration notes for Develocity and local caching."
+---
+
+Fineract uses a multi-project Gradle build declared in `settings.gradle`. As of the current codebase there are over 30 `include` directives covering core infrastructure, domain products, client libraries, test harnesses, and deployment artefacts. Understanding which module owns which domain prevents both duplicated code and unwanted circular dependencies.
+
+## Module Categories
+
+### Core / Infrastructure
+
+| Module | Purpose | Key Packages | Depends On |
+|---|---|---|---|
+| `fineract-core` | Platform backbone: multi-tenancy, JPA base classes, infrastructure services, business date, cache, serialization, events (internal + external), batch config | `o.a.f.infrastructure.core`, `o.a.f.infrastructure.businessdate`, `o.a.f.infrastructure.event`, `o.a.f.infrastructure.jobs`, `o.a.f.infrastructure.cache`, `o.a.f.infrastructure.configuration`, `o.a.f.infrastructure.dataqueries` | `fineract-avro-schemas` |
+| `fineract-security` | Authentication filters, JWT converter, 2FA OTP, SQL injection prevention, tenant user-details service | `o.a.f.infrastructure.security.filter`, `.service`, `.domain`, `.api`, `.converter` | `fineract-core` |
+| `fineract-validation` | Bean Validation extensions and custom constraint annotations used platform-wide | `o.a.f.infrastructure.validation` | `fineract-core` |
+| `fineract-avro-schemas` | Avro schema definitions and generated Java DTOs for all external event message types | `o.a.f.avro` | — |
+| `fineract-cob` | Close-of-Business Spring Batch jobs: loan COB, delinquency, interest accrual, instalment recalculation | `o.a.f.cob` | `fineract-core`, `fineract-loan` |
+
+### Command Pipeline
+
+| Module | Purpose | Key Classes | Depends On |
+|---|---|---|---|
+| `fineract-command` | Core abstractions and `SynchronousCommandDispatcher` | `Command`, `CommandDispatcher`, `CommandHandler`, `CommandState`, `CommandHookBefore/After/Error`, `CommandProperties` | `fineract-core` |
+| `fineract-command-jdbc` | JDBC-backed `CommandStore` persisting to `m_command`; Resilience4j retry + file DLQ | `JdbcCommandStore`, `CommandEntity`, `CommandRepository`, `JdbcCommandProperties` | `fineract-command` |
+| `fineract-command-audit` | Audit trail hook that writes to the legacy `m_portfolio_command_source` table | Audit `CommandHookBefore/After/Error` implementations | `fineract-command` |
+| `fineract-command-async` | WIP `AsyncCommandDispatcher` using `CompletableFuture` | `AsyncCommandDispatcher`, `AsyncCommandProperties` | `fineract-command` |
+| `fineract-command-disruptor` | WIP `DisruptorCommandDispatcher` using LMAX Disruptor ring buffer | `DisruptorCommandDispatcher`, `DisruptorCommandProperties` | `fineract-command` |
+| `fineract-command-test` | Test fixtures and stubs for command pipeline unit tests | — | `fineract-command` |
+
+### Domain Modules
+
+| Module | Purpose | Key Domain Areas | Depends On |
+|---|---|---|---|
+| `fineract-loan` | Loan lifecycle: creation, approval, disbursement, repayment, rescheduling, COB tasks, delinquency, loan events | `o.a.f.portfolio.loanaccount`, `o.a.f.portfolio.loanproduct`, `o.a.f.cob` | `fineract-core`, `fineract-accounting` |
+| `fineract-savings` | Savings, recurring deposits, fixed deposits, share accounts | `o.a.f.portfolio.savings`, `o.a.f.portfolio.shareaccounts` | `fineract-core`, `fineract-accounting` |
+| `fineract-accounting` | General ledger, journal entries, periodic accruals, GL accounts, financial activity mappings | `o.a.f.accounting` | `fineract-core` |
+| `fineract-charge` | Charge definitions and application logic (percentage, flat, instalment) | `o.a.f.portfolio.charge` | `fineract-core` |
+| `fineract-tax` | Tax component definitions and GL mappings | `o.a.f.portfolio.tax` | `fineract-core` |
+| `fineract-rates` | Rate definitions (floating interest) | `o.a.f.portfolio.rates` | `fineract-core` |
+| `fineract-branch` | Branch/office hierarchy management | `o.a.f.organisation` | `fineract-core` |
+| `fineract-document` | Document management (file attachments) | `o.a.f.infrastructure.documentmanagement` | `fineract-core` |
+| `fineract-investor` | External asset ownership and loan investor management | `o.a.f.investor` | `fineract-core`, `fineract-loan` |
+
+### Advanced / Specialty Products
+
+| Module | Purpose | Depends On |
+|---|---|---|
+| `fineract-progressive-loan` | Progressive loan scheduling engine (non-amortising, EMI variants) | `fineract-loan` |
+| `fineract-progressive-loan-embeddable-schedule-generator` | Standalone schedule generator library (no Spring, embeddable in external tools) | — |
+| `fineract-working-capital-loan` | Working capital revolving credit product | `fineract-loan` |
+| `fineract-loan-origination` | Loan origination workflow extensions | `fineract-loan` |
+| `fineract-mix` | MIX Market reporting data adapter | `fineract-core` |
+| `fineract-report` | Pentaho report integration and parameterized SQL reports | `fineract-core` |
+| `fineract-interoperation` | Interoperability layer (Mojaloop, payment switch integration) | `fineract-core` |
+
+### Assembly / Deployment
+
+| Module | Purpose |
+|---|---|
+| `fineract-provider` | Main assembly: `ServerApplication`, wires all domain modules; contains `application.properties` |
+| `fineract-war` | WAR packaging for external servlet containers |
+| `fineract-doc` | Documentation generation (OpenAPI, Swagger) |
+| `custom:docker` | Docker image assembly with all custom extensions |
+
+### Client / Integration Libraries
+
+| Module | Purpose |
+|---|---|
+| `fineract-client` | Generated Java client SDK for the Fineract REST API (OpenAPI generator) |
+| `fineract-client-feign` | Feign-based variant of the client SDK |
+
+### Testing
+
+| Module | Purpose |
+|---|---|
+| `integration-tests` | Integration test suite (Spring Boot Test, uses PostgreSQL/MariaDB via Testcontainers) |
+| `twofactor-tests` | Tests for the 2FA authentication flow |
+| `oauth2-tests` | Tests for OAuth2/JWT authentication flow |
+| `fineract-e2e-tests-core` | End-to-end test framework base classes |
+| `fineract-e2e-tests-runner` | End-to-end test runner |
+
+## Custom Extension Pattern
+
+The build supports a three-level namespace for company-specific extensions:
+
+```
+custom/
+  <company>/
+    <category>/
+      <module>/   → included as :custom:<company>:<category>:<module>
+```
+
+This is dynamically discovered via `settings.gradle`:
+
+```groovy
+file("${rootDir}/custom").eachDir { companyDir ->
+    if ('build' != companyDir.name && 'docker' != companyDir.name) {
+        file("${rootDir}/custom/${companyDir.name}").eachDir { categoryDir ->
+            file("${rootDir}/custom/${companyDir.name}/${categoryDir.name}").eachDir { moduleDir ->
+                include ":custom:${companyDir.name}:${categoryDir.name}:${moduleDir.name}"
+            }
+        }
+    }
+}
+```
+
+Custom modules can declare a dependency on any published Fineract module and contribute Spring `@Configuration` classes that are picked up via auto-configuration.
+
+## Build Configuration Highlights
+
+**Develocity build scans** (`settings.gradle`):
+
+```groovy
+develocity {
+    projectId = "fineract"
+    server = "https://develocity.apache.org"
+    buildScan {
+        uploadInBackground = !isCI
+        publishing.onlyIf { it.authenticated }
+    }
+}
+```
+
+Build scans are uploaded to the Apache Develocity instance. On CI (`JENKINS_URL` set), uploads are synchronous; locally they run in the background. IP addresses in scans are obfuscated to `0.0.0.0`.
+
+**Local build cache** is enabled by default (`buildCache.local.enabled = true`), meaning incremental compilation results are cached across Gradle invocations on the developer machine.
+
+<Note>
+Gradle configuration in `buildSrc/` contains shared logic: the `fineractJavaProjects` and `fineractPublishProjects` extension functions that configure checkstyle, PMD, SpotBugs, and Maven publication settings consistently across all submodules.
+</Note>

@@ -1,0 +1,141 @@
+{
+  "projectType": "api-service",
+  "projectName": "Apache Fineract",
+  "projectDescription": "A production-grade open-core banking platform providing a multi-tenant, Spring Boot REST API for loan origination, savings accounts, double-entry accounting, and nightly Close-of-Business batch processing across microfinance institutions.",
+  "theme": "maple",
+  "primaryColor": "#c35696",
+  "lightColor": "#1d5e8b",
+  "darkColor": "#faf6fa",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "overview/introduction",
+              "overview/architecture",
+              "overview/module-map"
+            ]
+          },
+          {
+            "group": "Core Infrastructure",
+            "pages": [
+              "core/fineract-core",
+              "core/command-system",
+              "core/event-system",
+              "core/security"
+            ]
+          },
+          {
+            "group": "Loan Domain",
+            "pages": [
+              "loan/loan-accounts",
+              "loan/loan-products",
+              "loan/progressive-loan",
+              "loan/delinquency",
+              "loan/origination"
+            ]
+          },
+          {
+            "group": "Savings Domain",
+            "pages": [
+              "savings/savings-accounts",
+              "savings/deposit-products",
+              "savings/share-accounts"
+            ]
+          },
+          {
+            "group": "Accounting",
+            "pages": [
+              "accounting/general-ledger",
+              "accounting/journal-entries",
+              "accounting/provisioning"
+            ]
+          },
+          {
+            "group": "Batch & COB",
+            "pages": [
+              "batch/cob-framework",
+              "batch/cob-loan-steps",
+              "batch/scheduled-jobs"
+            ]
+          },
+          {
+            "group": "Platform Services",
+            "pages": [
+              "platform/multi-tenancy",
+              "platform/organisation",
+              "platform/user-administration",
+              "platform/reporting",
+              "platform/bulk-import"
+            ]
+          },
+          {
+            "group": "Investor & Asset Transfer",
+            "pages": [
+              "investor/external-asset-owners",
+              "investor/transfer-lifecycle"
+            ]
+          },
+          {
+            "group": "Integration & Clients",
+            "pages": [
+              "integration/java-client-sdk",
+              "integration/avro-event-schemas",
+              "integration/interoperability"
+            ]
+          },
+          {
+            "group": "Build & Deployment",
+            "pages": [
+              "deployment/build-system",
+              "deployment/docker-compose",
+              "deployment/kubernetes",
+              "deployment/database-migrations",
+              "deployment/configuration"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-tenant Spring Boot REST API (fineract-provider, ServerApplication)",
+    "CQRS command system with pluggable dispatchers (fineract-command, fineract-command-jdbc, fineract-command-async, fineract-command-disruptor)",
+    "Double-entry accounting engine (fineract-accounting: GL accounts, journal entries, accruals, provisioning)",
+    "Classic and Progressive (actuarial EMI) loan products (fineract-loan, fineract-progressive-loan)",
+    "Savings, Fixed Deposit, and Recurring Deposit accounts (fineract-savings)",
+    "Close-of-Business (COB) nightly batch processing via Spring Batch (fineract-cob)",
+    "External Asset Owner / Loan Securitisation marketplace (fineract-investor)",
+    "Multi-tenancy with per-tenant datasource and master tenant registry",
+    "Liquibase-managed schema with 236+ versioned changesets across MySQL/MariaDB and PostgreSQL",
+    "Apache Avro event schemas for Kafka/ActiveMQ event streaming (fineract-avro-schemas)",
+    "Java Retrofit SDK (fineract-client) and OpenFeign SDK (fineract-client-feign)",
+    "Two-factor authentication, OAuth2, and Basic Auth (fineract-security)",
+    "Docker Compose, Kubernetes, and configurable deployment profiles",
+    "30-module Gradle multi-module monorepo with custom extension plugin pattern",
+    "Working capital loans, interoperability (Mojaloop), share accounts, SPM surveys, bulk import"
+  ],
+  "publicApiSurface": [
+    "org.apache.fineract.ServerApplication (Spring Boot entry point)",
+    "GET/POST /api/v1/loans — loan account CRUD",
+    "GET/POST /api/v1/loanproducts — loan product management",
+    "GET/POST /api/v1/savingsaccounts — savings account CRUD",
+    "GET/POST /api/v1/clients — client management",
+    "GET/POST /api/v1/glaccounts — general ledger chart of accounts",
+    "GET/POST /api/v1/journalentries — double-entry journal entries",
+    "POST /api/v1/loans/{loanId}/transactions — loan repayments and disbursements",
+    "GET/POST /api/v1/externalassetowners — investor loan transfer API",
+    "GET/POST /api/v1/delinquency/buckets — delinquency bucket management",
+    "POST /api/v1/rescheduleloans — loan rescheduling",
+    "GET/POST /api/v1/offices — organisational hierarchy",
+    "GET/POST /api/v1/users, /roles, /permissions — user administration",
+    "GET/POST /api/v1/scheduler — scheduled job management",
+    "POST /api/v1/loans/{loanId}/cob/catch-up — inline COB catch-up",
+    "GET /actuator/health/liveness, /actuator/health/readiness — health probes",
+    "FineractClient (fineract-client) — Java SDK entry point",
+    "COBBusinessStep<T> interface — COB extensibility SPI"
+  ]
+}

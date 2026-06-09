@@ -1,0 +1,239 @@
+---
+title: "Loan Products: Templates, Rules & GL Mapping"
+sidebarTitle: "Loan Products"
+description: "How LoanProduct entities work in fineract-loan: interest methods, amortization, payment allocation rules, GL account mapping, and CQRS handlers."
+---
+
+Loan products act as configuration templates that supply defaults for every loan account created under them. They live in the `fineract-loan` module under `org.apache.fineract.portfolio.loanproduct`. When a loan is originated, product settings are copied (or referenced) onto the `Loan` entity — allowing subsequent per-loan overrides while the product itself can change without retroactively affecting live accounts.
+
+<CardGroup cols={2}>
+  <Card title="Loan Accounts" icon="file-invoice-dollar" href="/loan/loan-accounts">
+    How product settings flow into the Loan entity at origination
+  </Card>
+  <Card title="Progressive Loans" icon="chart-line" href="/loan/progressive-loan">
+    Payment allocation rules and advanced schedule generation
+  </Card>
+</CardGroup>
+
+---
+
+## Module & package layout
+
+| Package | Purpose |
+|---|---|
+| `portfolio.loanproduct.domain` | JPA entities: `LoanProduct`, `LoanProductRelatedDetail`, `LoanProductPaymentAllocationRule`, `LoanProductCreditAllocationRule`, `LoanProductGuaranteeDetails`, `LoanProductFloatingRates` |
+| `portfolio.loanproduct.api` | `LoanProductsDetailsApiResource` — JAX-RS endpoints |
+| `portfolio.loanproduct.handler` | `CreateLoanProductCommandHandler`, `UpdateLoanProductCommandHandler` |
+| `portfolio.loanproduct.service` | `LoanProductReadPlatformService`, `LoanProductWritePlatformService` |
+| `portfolio.loanproduct.data` | Read-model DTOs |
+| `portfolio.loanproduct.exception` | `LoanProductNotFoundException`, `LoanProductGeneralRuleException` |
+| `portfolio.loanproduct.mapper` | MapStruct mappers |
+
+---
+
+## The `LoanProduct` entity
+
+`LoanProduct` maps to `m_product_loan`. It is annotated `@Entity @Getter @Setter` and extends `AbstractPersistableCustom<Long>`.
+
+```java
+// fineract-loan/…/loanproduct/domain/LoanProduct.java
+@Entity
+@Table(name = "m_product_loan", uniqueConstraints = {
+    @UniqueConstraint(columnNames = { "name" }, name = "unq_name"),
+    @UniqueConstraint(columnNames = { "external_id" }, name = "external_id_UNIQUE"),
+    @UniqueConstraint(columnNames = { "short_name" }, name = "unq_short_name")
+})
+public class LoanProduct extends AbstractPersistableCustom<Long> {
+
+    @Column(name = "name", nullable = false, unique = true)
+    private String name;
+
+    @Column(name = "short_name", nullable = false, unique = true)
+    private String shortName;
+
+    @Column(name = "loan_transaction_strategy_code", nullable = false)
+    private String transactionProcessingStrategyCode;
+
+    @Embedded
+    private LoanProductRelatedDetail loanProductRelatedDetail;
+
+    @OneToMany(cascade = CascadeType.ALL, mappedBy = "loanProduct", fetch = FetchType.EAGER)
+    private List<LoanProductPaymentAllocationRule> paymentAllocationRules;
+
+    @OneToMany(cascade = CascadeType.ALL, mappedBy = "loanProduct", fetch = FetchType.EAGER)
+    private List<LoanProductCreditAllocationRule> creditAllocationRules;
+
+    @ManyToOne
+    @JoinColumn(name = "fund_id")
+    private Fund fund;
+    // ...
+}
+```
+
+<Note>
+`paymentAllocationRules` and `creditAllocationRules` are loaded `EAGER`. These collections drive the `AdvancedPaymentScheduleTransactionProcessor` for progressive loans. On a cumulative-schedule product, they are empty and ignored.
+</Note>
+
+---
+
+## Interest method and amortization
+
+The `LoanProductRelatedDetail` embedded object carries the core financial parameters, backed by the `InterestMethod` and `AmortizationMethod` enums:
+
+### `InterestMethod`
+
+```java
+// fineract-loan/…/loanproduct/domain/InterestMethod.java
+DECLINING_BALANCE(0, "interestType.declining.balance"),
+FLAT(1, "interestType.flat"),
+INVALID(2, "interestType.invalid");
+```
+
+- **`DECLINING_BALANCE`** — interest is recalculated each period against the remaining outstanding principal. Used by both cumulative and progressive schedule types.
+- **`FLAT`** — total interest = principal × rate × tenor; divided equally across installments. Common in microfinance products.
+
+### `AmortizationMethod`
+
+```java
+// fineract-loan/…/loanproduct/domain/AmortizationMethod.java
+EQUAL_PRINCIPAL(0, "amortizationType.equal.principal"),
+EQUAL_INSTALLMENTS(1, "amortizationType.equal.installments"),
+INVALID(2, "amortizationType.invalid");
+```
+
+- **`EQUAL_INSTALLMENTS`** — classical EMI (EMI = constant, principal portion rises, interest portion falls). Required for `PROGRESSIVE` schedule type.
+- **`EQUAL_PRINCIPAL`** — principal repaid in equal chunks each period; total payment decreases over time.
+
+### Other key product parameters (via `LoanProductRelatedDetail`)
+
+| Parameter | Description |
+|---|---|
+| `repaymentEvery` + `repaymentPeriodFrequencyType` | Repayment frequency (e.g. 1 MONTH) |
+| `numberOfRepayments` | Default number of installments |
+| `nominalInterestRatePerPeriod` | Rate expressed per repayment period |
+| `graceOnPrincipalPayment` | Periods before principal repayment begins |
+| `graceOnInterestPayment` | Periods before interest repayment begins |
+| `graceOnInterestCharged` | Periods for which interest is not charged |
+| `interestCalculationPeriodMethod` | `SAME_AS_REPAYMENT_PERIOD` or `DAILY` |
+| `daysInMonthType` / `daysInYearType` | Day-count convention (ACTUAL, 30, 365, 360, etc.) |
+| `inArrearsTolerance` | Grace amount before a loan is considered in arrears |
+| `loanScheduleType` | `CUMULATIVE` or `PROGRESSIVE` |
+
+---
+
+## Product-to-GL account mapping
+
+Fineract maps loan products to general ledger accounts through `AccountingRuleType`, which controls which journal entries are posted and against which GL account codes. The `LoanProduct` entity has a `@ManyToOne` reference to a `Fund` and carries an `accountingType` via the embedded detail.
+
+The four accounting rule types relevant to loan products:
+
+| Value | Description |
+|---|---|
+| `NONE` | No accounting entries posted |
+| `CASH_BASED` | Entries on cash receipt/disbursement only |
+| `ACCRUAL_PERIODIC` | Accrual entries posted by the nightly batch job |
+| `ACCRUAL_UPFRONT` | All future interest accrued at disbursement |
+
+GL account associations are stored in `m_product_loan_gl_account` and managed by the accounting module's `ProductToGLAccountMapping` entity. The product carries the `accountingRuleType` selector; the GL module reads product ID to resolve the actual account codes.
+
+<Tip>
+When debugging missing journal entries, check `m_product_loan_gl_account` for the product in question and verify the `accounting_rule` column on `m_product_loan` matches the expected type.
+</Tip>
+
+---
+
+## Advanced payment allocation rules
+
+For products that use the `PROGRESSIVE` schedule type (backed by `AdvancedPaymentScheduleTransactionProcessor`), payment allocation is fully configurable per transaction type.
+
+### `LoanProductPaymentAllocationRule`
+
+```java
+// fineract-loan/…/loanproduct/domain/LoanProductPaymentAllocationRule.java
+@Table(name = "m_loan_product_payment_allocation_rule",
+    uniqueConstraints = @UniqueConstraint(
+        columnNames = { "loan_product_id", "transaction_type" }))
+public class LoanProductPaymentAllocationRule {
+
+    private LoanProduct loanProduct;
+
+    @Enumerated(EnumType.STRING)
+    private PaymentAllocationTransactionType transactionType;  // REPAYMENT, DOWN_PAYMENT, etc.
+
+    @Convert(converter = PaymentAllocationTypeListConverter.class)
+    private List<PaymentAllocationType> allocationTypes;       // PENALTY, FEE, INTEREST, PRINCIPAL
+
+    @Enumerated(EnumType.STRING)
+    private FutureInstallmentAllocationRule futureInstallmentAllocationRule; // NEXT_INSTALLMENT, LAST_INSTALLMENT, REAMORTIZATION
+}
+```
+
+`PaymentAllocationTransactionType` covers: `DEFAULT`, `REPAYMENT`, `DOWN_PAYMENT`, `MERCHANT_ISSUED_REFUND`, `PAYOUT_REFUND`, `GOODWILL_CREDIT`, `CHARGE_REFUND`, `CHARGE_ADJUSTMENT`.
+
+`AllocationType` ordering: `PENALTY → FEE → INTEREST → PRINCIPAL` (or any permutation configured in `allocationTypes`).
+
+### `LoanProductCreditAllocationRule`
+
+Used for chargeback processing. The same ordered `List<AllocationType>` tells the processor in which order to reverse components:
+
+```java
+// fineract-loan/…/loanproduct/domain/LoanProductCreditAllocationRule.java
+@Table(name = "m_loan_product_credit_allocation_rule")
+public class LoanProductCreditAllocationRule {
+    private LoanProduct loanProduct;
+
+    @Enumerated(EnumType.STRING)
+    private CreditAllocationTransactionType transactionType; // CHARGEBACK
+
+    @Convert(converter = AllocationTypeListConverter.class)
+    private List<AllocationType> allocationTypes;
+}
+```
+
+At loan origination, these product-level rules are copied into `LoanPaymentAllocationRule` and `LoanCreditAllocationRule` rows linked to the `Loan` entity, allowing per-loan overrides.
+
+---
+
+## Relationship to Loan Account
+
+When a new loan application is submitted:
+
+1. `LoanApplicationWritePlatformServiceJpaRepositoryImpl` reads `LoanProduct` by ID.
+2. `LoanProductRelatedDetail` is copied into the new `Loan` as `loanRepaymentScheduleDetail`.
+3. `paymentAllocationRules` are cloned from the product into `m_loan_payment_allocation_rule`.
+4. `creditAllocationRules` are cloned into `m_loan_credit_allocation_rule`.
+5. The `transactionProcessingStrategyCode` is copied to `m_loan.loan_transaction_strategy_code`.
+
+Product changes after origination do **not** retroactively update existing loans. To query which strategy code is active on a given loan, read `m_loan.loan_transaction_strategy_code`.
+
+---
+
+## CQRS handlers
+
+| Handler | Command source | Action |
+|---|---|---|
+| `CreateLoanProductCommandHandler` | `POST /v1/loanproducts` | Validates and persists a new `LoanProduct` |
+| `UpdateLoanProductCommandHandler` | `PUT /v1/loanproducts/{productId}` | Updates product fields, replaces payment/credit allocation rules |
+
+Both handlers delegate to `LoanProductWritePlatformService`. Validation includes:
+- At least one payment allocation rule must cover the `DEFAULT` transaction type.
+- Interest rate and term constraints must be logically consistent (min ≤ default ≤ max).
+- `PROGRESSIVE` schedule type requires `EQUAL_INSTALLMENTS` amortization and `DECLINING_BALANCE` interest method.
+
+---
+
+## REST endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/loanproducts` | List all products (summary) |
+| `POST` | `/v1/loanproducts` | Create a product |
+| `GET` | `/v1/loanproducts/{productId}` | Retrieve a product with full detail |
+| `PUT` | `/v1/loanproducts/{productId}` | Update a product |
+| `GET` | `/v1/loanproducts/template` | Returns template with enumerations for UI dropdowns |
+
+`LoanProductsDetailsApiResource` implements these and is registered in `fineract-loan`.
+
+<Warning>
+Updating a product's `transactionProcessingStrategyCode` only affects **new** loans. Existing active loans retain their own copy of the strategy code.
+</Warning>

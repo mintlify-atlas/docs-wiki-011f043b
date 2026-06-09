@@ -1,0 +1,292 @@
+---
+title: "Kubernetes Deployment Manifests"
+sidebarTitle: "Kubernetes"
+description: "Reference for the Kubernetes manifests in the kubernetes/ directory: MariaDB stateful pod with PersistentVolume, Fineract LoadBalancer service, health probes, and secret management."
+---
+
+The `kubernetes/` directory contains a minimal set of Kubernetes manifests for
+deploying Fineract and a MariaDB database on a Kubernetes cluster. These
+manifests are reference examples — they assume a single-node or development
+cluster and do not include ingress, horizontal pod autoscaling, or network
+policies. They are the starting point for more production-ready configurations.
+
+<CardGroup cols={2}>
+  <Card title="Docker Compose" href="/deployment/docker-compose" icon="docker">
+    Simpler local setup for development and CI
+  </Card>
+  <Card title="Configuration" href="/deployment/configuration" icon="sliders">
+    All env vars accepted by the Fineract container
+  </Card>
+</CardGroup>
+
+## Files
+
+```
+kubernetes/
+  fineractmysql-deployment.yml   # PV + PVC + MariaDB Service + MariaDB Deployment
+  fineractmysql-configmap.yml    # Init SQL for database creation
+  fineract-server-deployment.yml # Fineract Service (LoadBalancer) + Fineract Deployment
+  fineract-mifoscommunity-deployment.yml  # Community web app overlay
+  kubectl-startup.sh             # Convenience: apply all manifests
+  kubectl-shutdown.sh            # Convenience: delete all resources
+```
+
+## MariaDB (`fineractmysql-deployment.yml`)
+
+### PersistentVolume and PVC
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fineractmysql-pv-volume
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 10Gi
+  accessModes: [ReadWriteMany]
+  hostPath:
+    path: "/mnt/data"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fineractmysql-pv-claim
+spec:
+  storageClassName: manual
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 5Gi
+```
+
+The PV uses a `hostPath` mount at `/mnt/data`. For cloud deployments, replace with
+a `storageClassName` that provisions dynamic volumes (e.g. `gp2` on AWS EKS,
+`standard` on GKE).
+
+### MariaDB Service
+
+The MariaDB `Service` uses `clusterIP: None` (headless), which means the DNS
+name `fineractmysql` resolves directly to the pod IP rather than a virtual IP:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: fineractmysql
+spec:
+  clusterIP: None
+  ports: [{ port: 3306, targetPort: 3306 }]
+  selector:
+    app: fineract-server
+    tier: fineractmysql
+```
+
+### MariaDB Deployment
+
+```yaml
+containers:
+  - image: mariadb:12.2
+    args: ["--innodb-snapshot-isolation=OFF"]
+    resources:
+      requests: { memory: "1Gi", cpu: "1000m" }
+      limits:   { memory: "5Gi", cpu: "2000m" }
+    env:
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: fineract-tenants-db-secret
+            key: password
+    livenessProbe:
+      exec:
+        command: ["sh", "-c", "mariadb -uroot -p${MARIADB_ROOT_PASSWORD} -e 'SELECT 1'"]
+      failureThreshold: 10
+      timeoutSeconds: 10
+    readinessProbe:
+      exec:
+        command: ["sh", "-c", "mariadb -uroot -p${MARIADB_ROOT_PASSWORD} -e 'SELECT 1'"]
+      failureThreshold: 10
+      initialDelaySeconds: 5
+      periodSeconds: 5
+    volumeMounts:
+      - name: fineractmysql-initdb
+        mountPath: /docker-entrypoint-initdb.d/
+      - name: fineractmysql-persistent-storage
+        mountPath: /var/lib/mysql/
+```
+
+The `--innodb-snapshot-isolation=OFF` flag is required for Fineract's locking
+behaviour with MariaDB. The MariaDB root password is injected from the
+`fineract-tenants-db-secret` Secret (see below).
+
+### Init SQL ConfigMap (`fineractmysql-configmap.yml`)
+
+The `fineractmysql-initdb` ConfigMap is mounted at `/docker-entrypoint-initdb.d/`.
+MariaDB executes all `.sql` files in that directory on first start. The configmap
+creates the `fineract_tenants` database and grants the required privileges.
+
+## Fineract Application (`fineract-server-deployment.yml`)
+
+### Service
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: fineract-server
+spec:
+  type: LoadBalancer
+  ports: [{ port: 8443, targetPort: 8443, protocol: TCP }]
+  selector:
+    app: fineract-server
+    tier: backend
+```
+
+The `LoadBalancer` type provisions a cloud load balancer (AWS ELB, GCP LB) that
+exposes port 8443. For on-premises deployments, switch to `NodePort` or add an
+Ingress resource.
+
+### Fineract Container
+
+```yaml
+containers:
+  - name: fineract-server
+    image: apache/fineract:latest
+    resources:
+      requests: { cpu: "200m",  memory: "1Gi" }
+      limits:   { cpu: "1000m", memory: "2Gi" }
+    env:
+      - name: FINERACT_NODE_ID
+        value: '1'
+      - name: FINERACT_HIKARI_DRIVER_CLASS_NAME
+        value: org.mariadb.jdbc.Driver
+      - name: FINERACT_HIKARI_JDBC_URL
+        value: jdbc:mariadb://fineractmysql:3306/fineract_tenants
+      - name: FINERACT_HIKARI_USERNAME
+        valueFrom: { secretKeyRef: { name: fineract-tenants-db-secret, key: username } }
+      - name: FINERACT_HIKARI_PASSWORD
+        valueFrom: { secretKeyRef: { name: fineract-tenants-db-secret, key: password } }
+      - name: FINERACT_DEFAULT_TENANTDB_HOSTNAME
+        value: fineractmysql
+      - name: FINERACT_DEFAULT_TENANTDB_PORT
+        value: '3306'
+      - name: FINERACT_SERVER_PORT
+        value: "8443"
+      - name: JAVA_TOOL_OPTIONS
+        value: '-Xmx1G -XX:MaxMetaspaceSize=256m'
+    ports:
+      - containerPort: 8443
+        name: fineract-server
+```
+
+### JVM Flags
+
+```
+JAVA_TOOL_OPTIONS=-Xmx1G -XX:MaxMetaspaceSize=256m
+```
+
+These are set conservatively for a 2 Gi memory limit container. If the heap
+limit (`-Xmx`) is increased, adjust the container memory limit accordingly to
+leave headroom for the JVM's non-heap memory (Metaspace, code cache, thread
+stacks).
+
+### Health Probes
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /fineract-provider/actuator/health/liveness
+    port: 8443
+    scheme: HTTPS
+  initialDelaySeconds: 90    # Fineract + Liquibase startup can take ~60-90s
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /fineract-provider/actuator/health/readiness
+    port: 8443
+    scheme: HTTPS
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+The liveness probe restarts the pod if it becomes unresponsive after initial
+startup. The readiness probe removes the pod from the load-balancer endpoint
+list until it is ready to serve traffic. Both use Spring Boot Actuator health
+groups and require HTTPS (the Fineract server does not offer HTTP).
+
+### Init Container: DB Readiness Gate
+
+```yaml
+initContainers:
+  - name: init-mydb
+    image: busybox:1.28
+    command:
+      - sh
+      - -c
+      - |
+        echo "Checking for the availability of MYSQL server deployment"
+        while ! nc -z "fineractmysql" 3306; do
+          sleep 1; printf "-"
+        done
+        echo " >> MYSQL server has started"
+```
+
+The init container polls TCP port 3306 every second until MariaDB is accepting
+connections. Only after it exits 0 does Kubernetes start the Fineract container.
+
+## Secret Management
+
+Create the `fineract-tenants-db-secret` Secret before applying manifests:
+
+```bash
+kubectl create secret generic fineract-tenants-db-secret \
+  --from-literal=username=root \
+  --from-literal=password=YourSecurePassword
+```
+
+<Warning>
+Never commit credentials to source control. The `kubectl create secret` command
+above is for documentation purposes. In production use an external secrets
+manager (AWS Secrets Manager, Vault, Sealed Secrets) to provision the Secret.
+</Warning>
+
+The Secret is referenced by both the MariaDB container (`MARIADB_ROOT_PASSWORD`)
+and the Fineract container (`FINERACT_HIKARI_USERNAME`, `FINERACT_HIKARI_PASSWORD`,
+`FINERACT_DEFAULT_TENANTDB_UID`, `FINERACT_DEFAULT_TENANTDB_PWD`).
+
+## Startup and Shutdown Scripts
+
+```bash
+# Apply all manifests in dependency order
+./kubernetes/kubectl-startup.sh
+
+# Delete all resources (does not delete PV/PVC by default)
+./kubernetes/kubectl-shutdown.sh
+```
+
+The scripts wrap `kubectl apply -f` and `kubectl delete -f` for convenience.
+Review and adapt them to your cluster namespace and context.
+
+## Deployment Strategy
+
+Both deployments use `strategy.type: Recreate`:
+
+```yaml
+strategy:
+  type: Recreate
+```
+
+`Recreate` terminates the existing pod before starting the new one. This is
+required for MariaDB (single writer) and recommended for Fineract when running
+a single instance. For multi-instance deployments with rolling updates, switch to
+`RollingUpdate` and ensure all instances share the same database and the Liquibase
+migration lock is handled correctly.
+
+## Community App (`fineract-mifoscommunity-deployment.yml`)
+
+An optional overlay that adds the Mifos Community Web App container alongside
+the Fineract API pod. The community app is a standalone frontend container that
+connects to the Fineract API at `https://fineract-server:8443`.

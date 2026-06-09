@@ -1,0 +1,314 @@
+---
+title: "Fineract Security: Authentication, 2FA, and Multi-Tenancy"
+sidebarTitle: "Security"
+description: "Authentication modes (Basic Auth, OAuth2/JWT, 2FA OTP), filter chain details, JWT token conversion, SQL injection prevention, and security configuration properties."
+---
+
+The `fineract-security` module implements all authentication and authorization infrastructure for the platform. It ships four Spring Security servlet filters that collectively handle tenant resolution, user authentication, business date context, and optional two-factor token validation. Security mode is switched entirely through configuration properties — no code changes are required to move between Basic Auth and OAuth2.
+
+## Module Layout
+
+```
+fineract-security/src/main/java/org/apache/fineract/infrastructure/security/
+├── api/
+│   ├── AuthenticationApiResource.java        POST /v1/authentication  (Basic Auth mode)
+│   ├── LoginController.java                  POST /v1/oauth/token     (OAuth2 mode)
+│   ├── TwoFactorApiResource.java             POST /v1/twofactor
+│   ├── TwoFactorConfigurationApiResource.java GET /v1/twofactor/configure
+│   └── UserDetailsApiResource.java           GET /v1/userdetails
+├── command/
+│   ├── InvalidateTFAccessTokenCommandHandler.java
+│   └── UpdateTwoFactorConfigCommandHandler.java
+├── constants/
+│   ├── TenantConstants.java
+│   ├── TwoFactorConfigurationConstants.java
+│   └── TwoFactorConstants.java
+├── converter/
+│   └── FineractJwtAuthenticationTokenConverter.java
+├── data/
+│   ├── AccessTokenData.java
+│   ├── AuthenticatedUserData.java
+│   ├── AuthenticatedOauthUserData.java
+│   ├── FineractJwtAuthenticationToken.java
+│   ├── OTPDeliveryMethod.java
+│   ├── OTPMetadata.java
+│   ├── OTPRequest.java
+│   └── TenantAuthenticationDetails.java
+├── domain/
+│   ├── TFAccessToken.java                   JPA entity: twofactor_access_token
+│   ├── TFAccessTokenRepository.java
+│   ├── TwoFactorConfiguration.java
+│   ├── TwoFactorConfigurationRepository.java
+│   └── OTPRequestRepository.java
+├── exception/
+│   ├── AccessTokenInvalidIException.java
+│   ├── EscapeSqlLiteralException.java
+│   ├── ForcePasswordResetException.java
+│   ├── OTPTokenInvalidException.java
+│   └── PasswordResetRequiredException.java
+├── filter/
+│   ├── TenantAwareBasicAuthenticationFilter.java
+│   ├── TenantAwareAuthenticationFilter.java
+│   ├── TwoFactorAuthenticationFilter.java
+│   └── BusinessDateFilter.java
+└── service/
+    ├── AuthTenantDetailsService.java / ...Jdbc.java
+    ├── FineractJwtAuthenticationTokenConverter.java
+    ├── RandomOTPGenerator.java
+    ├── SpringSecurityPlatformSecurityContext.java
+    ├── SqlInjectionPreventerServiceImpl.java
+    ├── TenantAwareJpaPlatformUserDetailsService.java
+    ├── TwoFactorConfigurationService.java
+    ├── TwoFactorService.java
+    └── UUIDAccessTokenGenerationService.java
+```
+
+## Authentication Modes
+
+Three mutually non-exclusive profiles are controlled by properties:
+
+| Mode | Property | Env Var | Default |
+|---|---|---|---|
+| HTTP Basic Auth | `fineract.security.basicauth.enabled` | `FINERACT_SECURITY_BASICAUTH_ENABLED` | `true` |
+| OAuth2 / JWT | `fineract.security.oauth2.enabled` | `FINERACT_SECURITY_OAUTH_ENABLED` | `false` |
+| Two-Factor Auth | `fineract.security.2fa.enabled` | `FINERACT_SECURITY_2FA_ENABLED` | `false` |
+
+`AuthenticationApiResource` is gated by `@ConditionalOnProperty("fineract.security.basicauth.enabled")`. The OAuth2 path is activated by setting `fineract.security.oauth2.enabled=true`, which registers a resource server accepting Bearer JWT tokens.
+
+## Filter Chain
+
+### `TenantAwareBasicAuthenticationFilter`
+
+Extends Spring Security's `BasicAuthenticationFilter`. Executes on every non-OPTIONS request:
+
+1. Reads `Fineract-Platform-TenantId` header (falls back to `tenantIdentifier` query param).
+2. Calls `AuthTenantDetailsService.loadTenantById(tenantIdentifier, isReportRequest)` — queries the shared tenant metadata DB.
+3. Stores `FineractPlatformTenant` in `ThreadLocalContextUtil.setTenant(tenant)`.
+4. Loads business dates via `BusinessDateReadPlatformService.getBusinessDates()` and stores in `ThreadLocalContextUtil.setBusinessDates(businessDates)`.
+5. Extracts the raw `Authorization: Basic ...` token into `ThreadLocalContextUtil.setAuthToken(...)`.
+6. On first-ever request, detects whether EhCache is enabled and switches cache mode accordingly.
+7. Delegates to `super.doFilterInternal()` which validates the Basic Auth credentials against `TenantAwareJpaPlatformUserDetailsService`.
+
+```java
+// Header constant
+private static final String TENANT_ID_REQUEST_HEADER = "Fineract-Platform-TenantId";
+
+// On successful auth:
+protected void onSuccessfulAuthentication(HttpServletRequest request,
+        HttpServletResponse response, Authentication authResult) throws IOException {
+    AppUser user = (AppUser) authResult.getPrincipal();
+    if (userNotificationService.hasUnreadUserNotifications(user.getId())) {
+        response.addHeader("X-Notification-Refresh", "true");
+    }
+}
+```
+
+`ThreadLocalContextUtil.reset()` is always called in the `finally` block to prevent tenant context leakage between requests.
+
+### `TenantAwareAuthenticationFilter`
+
+OAuth2-mode equivalent of `TenantAwareBasicAuthenticationFilter`. Handles tenant resolution for requests carrying a Bearer JWT token. Tenant ID is still expected in the `Fineract-Platform-TenantId` header.
+
+### `BusinessDateFilter`
+
+A lightweight filter that runs after authentication. It re-reads the tenant's current business dates from `ThreadLocalContextUtil` (already populated by the authentication filter) and makes them available to downstream services. Can also be used standalone in test setups.
+
+### `TwoFactorAuthenticationFilter`
+
+Activated when `fineract.security.2fa.enabled=true`. Runs after the primary authentication filter:
+
+1. Only acts when `authentication.getPrincipal() instanceof AppUser` — i.e. the user is already authenticated.
+2. Reads the `Fineract-Platform-TFA-Token` header.
+3. If the user has the `BYPASS_TWOFACTOR` permission, unconditionally grants `TWOFACTOR_AUTHENTICATED` authority.
+4. Otherwise validates the token via `TwoFactorService.validateTwoFactorAccessToken(user, token)`. If valid, adds `TWOFACTOR_AUTHENTICATED` to the authentication's authority list.
+5. If the token is missing or invalid, returns HTTP 403.
+
+```java
+// TwoFactorAuthenticationFilter — authority added on success:
+new SimpleGrantedAuthority(TwoFactorConstants.TWOFACTOR_AUTHENTICATED_AUTHORITY)
+```
+
+## JWT Authentication
+
+### `FineractJwtAuthenticationToken`
+
+A Spring Security `AbstractAuthenticationToken` subclass that carries both the decoded `Jwt` and the resolved `UserDetails` (`AppUser`):
+
+```java
+public class FineractJwtAuthenticationToken extends AbstractOAuth2TokenAuthenticationToken<Jwt> {
+    // holds Jwt + UserDetails; used as principal throughout the app
+}
+```
+
+### `FineractJwtAuthenticationTokenConverter`
+
+Implements `Converter<Jwt, FineractJwtAuthenticationToken>`. Called by Spring Security's resource server on each request:
+
+```java
+@Override
+public FineractJwtAuthenticationToken convert(@NonNull Jwt jwt) {
+    try {
+        UserDetails user = userDetailsService.loadUserByUsername(jwt.getSubject());
+        Collection<GrantedAuthority> authorities =
+            new JwtGrantedAuthoritiesConverter().convert(jwt);
+        return new FineractJwtAuthenticationToken(jwt, authorities, user);
+    } catch (UsernameNotFoundException ex) {
+        throw new OAuth2AuthenticationException(
+            new OAuth2Error(OAuth2ErrorCodes.INVALID_TOKEN), ex);
+    }
+}
+```
+
+The JWT `sub` claim must match a valid `AppUser.username` in the tenant's database.
+
+## Two-Factor Authentication (OTP)
+
+### `TwoFactorService` Interface
+
+```java
+public interface TwoFactorService {
+    List<OTPDeliveryMethod> getDeliveryMethodsForUser(AppUser user);
+    OTPRequest createNewOTPToken(AppUser user, String deliveryMethodName,
+        boolean extendedAccessToken);
+    TFAccessToken createAccessTokenFromOTP(AppUser user, String otpToken);
+    void validateTwoFactorAccessToken(AppUser user, String token);
+    TFAccessToken fetchAccessTokenForUser(AppUser user, String token);
+    TFAccessToken invalidateAccessToken(AppUser user, JsonCommand command);
+}
+```
+
+### OTP Generation: `RandomOTPGenerator`
+
+```java
+public class RandomOTPGenerator {
+    private static final String allowedCharacters =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVQXYZ";
+    private final int tokenLength;
+    private final SecureRandom secureRandom = new SecureRandom();
+
+    public String generate() {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < tokenLength; i++) {
+            builder.append(allowedCharacters.charAt(
+                (int) (secureRandom.nextDouble() * allowedCharacters.length())));
+        }
+        return builder.toString();
+    }
+}
+```
+
+Token length and delivery method are configured in the `two_factor_configuration` table (managed via `TwoFactorConfigurationApiResource`). Delivery methods are extensible — the platform defines SMS and email channels.
+
+### `TFAccessToken` Entity
+
+```java
+@Entity
+@Table(name = "twofactor_access_token",
+    uniqueConstraints = @UniqueConstraint(columnNames = {"token", "appuser_id"}))
+public class TFAccessToken extends AbstractPersistableCustom<Long> {
+    String token;          // 32-char random UUID string
+    AppUser user;          // ManyToOne → m_appuser
+    LocalDateTime validFrom;
+    LocalDateTime validTo;
+    boolean enabled;
+}
+```
+
+`UUIDAccessTokenGenerationService` generates the access token value. The token has a configurable TTL controlled by `TwoFactorConfigurationConstants`.
+
+### 2FA REST Flow
+
+```
+1. Client authenticates normally:
+   POST /api/v1/authentication
+   → returns AuthenticatedUserData with isTwoFactorAuthenticationRequired=true
+
+2. Client requests OTP:
+   POST /api/v1/twofactor
+   Body: { "deliveryMethod": "sms" }
+   → OTP sent to configured delivery channel
+
+3. Client submits OTP:
+   POST /api/v1/twofactor
+   Body: { "token": "<OTP>" }
+   → returns AccessTokenData with the TFA access token
+
+4. All subsequent requests include:
+   Fineract-Platform-TFA-Token: <access-token>
+   → TwoFactorAuthenticationFilter adds TWOFACTOR_AUTHENTICATED authority
+```
+
+## Key REST Endpoints
+
+| Method | Path | Class | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/authentication` | `AuthenticationApiResource` | Basic Auth login, returns roles and permissions |
+| `POST` | `/api/v1/twofactor` | `TwoFactorApiResource` | Request OTP or validate OTP and receive access token |
+| `GET` | `/api/v1/twofactor/configure` | `TwoFactorConfigurationApiResource` | Read current 2FA configuration |
+| `PUT` | `/api/v1/twofactor/configure` | `TwoFactorConfigurationApiResource` | Update 2FA configuration |
+| `GET` | `/api/v1/userdetails` | `UserDetailsApiResource` | Return current authenticated user's details |
+
+## SQL Injection Prevention
+
+`SqlInjectionPreventerServiceImpl` is used wherever user-supplied strings are interpolated into raw SQL (primarily in the `dataqueries` / reports subsystem):
+
+```java
+@Service
+public class SqlInjectionPreventerServiceImpl implements SqlInjectionPreventerService {
+
+    public String encodeSql(String literal) {
+        if (literal == null) return "NULL";
+
+        if (databaseTypeResolver.isMySQL()) {
+            return escapeMySQLLiteral(literal);  // custom MySQL escaping
+        } else if (databaseTypeResolver.isPostgreSQL()) {
+            return Utils.escapeLiteral(null, literal, true).toString(); // PostgreSQL JDBC utils
+        }
+        return literal;
+    }
+}
+```
+
+MySQL escaping covers: null byte (`\0`), single quote (`'`), double quote (`"`), backslash (`\`), newline (`\n`), carriage return (`\r`), tab (`\t`), and ASCII 26 (Ctrl-Z). This replaced an ESAPI-based approach to address CVE-2025-5878.
+
+<Warning>
+Do not use `String.format` or string concatenation to build SQL with user input. Always pass user-supplied strings through `SqlInjectionPreventerService.encodeSql()`. In JPA/Hibernate query paths, use named parameters (`@Param`) instead.
+</Warning>
+
+## Force-Password-Reset Flow
+
+When `SpringSecurityPlatformSecurityContext` detects that the authenticated `AppUser` has `mustChangePassword=true`, it throws `PasswordResetRequiredException`. `PasswordResetRequiredExceptionMapper` translates this to HTTP 403 with a `ForcePasswordReset` error code, prompting the client to redirect the user to the password change screen before allowing further API calls. The `ForcePasswordResetException` is separate and used specifically for admin-triggered resets.
+
+## Security Configuration Reference
+
+```properties
+# Basic Auth
+fineract.security.basicauth.enabled=${FINERACT_SECURITY_BASICAUTH_ENABLED:true}
+
+# OAuth2
+fineract.security.oauth2.enabled=${FINERACT_SECURITY_OAUTH_ENABLED:false}
+
+# Two-Factor Auth
+fineract.security.2fa.enabled=${FINERACT_SECURITY_2FA_ENABLED:false}
+
+# HSTS
+fineract.security.hsts.enabled=${FINERACT_SECURITY_HSTS_ENABLED:false}
+
+# CORS
+fineract.security.cors.enabled=${FINERACT_SECURITY_CORS_ENABLED:true}
+fineract.security.cors.allowed-origin-patterns=${FINERACT_SECURITY_CORS_ALLOWED_ORIGIN_PATTERNS:*}
+fineract.security.cors.allowed-methods=${FINERACT_SECURITY_CORS_ALLOWED_METHODS:*}
+fineract.security.cors.allowed-headers=${FINERACT_SECURITY_CORS_ALLOWED_HEADERS:*}
+fineract.security.cors.exposed-headers=${FINERACT_SECURITY_CORS_EXPOSED_HEADERS:*}
+fineract.security.cors.allow-credentials=${FINERACT_SECURITY_CORS_ALLOW_CREDENTIALS:true}
+
+# OAuth2 client (example: frontend-client)
+fineract.security.oauth2.client.registrations.frontend-client.client-id=frontend-client
+fineract.security.oauth2.client.registrations.frontend-client.scopes=read,write
+fineract.security.oauth2.client.registrations.frontend-client.authorization-grant-types=authorization_code,refresh_token
+fineract.security.oauth2.client.registrations.frontend-client.redirect-uris=http://localhost:3000/callback
+```
+
+<Note>
+Basic Auth and OAuth2 can both be enabled simultaneously. This is used during migration periods where some clients still use Basic Auth while others have moved to OAuth2. The Spring Security filter chain resolves authentication by trying each mode in order.
+</Note>

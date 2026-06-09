@@ -1,0 +1,237 @@
+---
+title: "Gradle Multi-Module Build System"
+sidebarTitle: "Build System"
+description: "Fineract is a 30-module Gradle monorepo with Develocity build scans, local build cache, custom extension support, and Lombok-based compilation."
+---
+
+Apache Fineract uses a Gradle multi-module monorepo managed by `settings.gradle`.
+The build root aggregates 30 declared modules ranging from core infrastructure to
+domain-specific modules, test suites, and the client SDK. The build system is
+configured for fast incremental builds via Develocity build scans and a local
+build cache.
+
+<CardGroup cols={2}>
+  <Card title="Docker Compose" href="/deployment/docker-compose" icon="docker">
+    Run the full stack for local testing
+  </Card>
+  <Card title="Configuration" href="/deployment/configuration" icon="sliders">
+    application.properties reference
+  </Card>
+</CardGroup>
+
+## Modules
+
+All modules are declared in `settings.gradle`:
+
+```groovy
+rootProject.name = 'fineract'
+
+include ':fineract-core'
+include ':fineract-security'
+include ':fineract-cob'
+include ':fineract-validation'
+include ':fineract-command'
+include ':fineract-command-test'
+include ':fineract-command-jdbc'
+include ':fineract-command-audit'
+include ':fineract-command-async'
+include ':fineract-command-disruptor'
+include ':fineract-accounting'
+include ':fineract-provider'
+include ':fineract-branch'
+include ':fineract-document'
+include ':fineract-investor'
+include ':fineract-rates'
+include ':fineract-charge'
+include ':fineract-tax'
+include ':fineract-loan-origination'
+include ':fineract-loan'
+include ':fineract-savings'
+include ':fineract-report'
+include ':fineract-mix'
+include ':fineract-war'
+include ':integration-tests'
+include ':twofactor-tests'
+include ':oauth2-tests'
+include ':fineract-client'
+include ':fineract-client-feign'
+include ':fineract-doc'
+include ':fineract-avro-schemas'
+```
+
+### Module Categories
+
+**`fineractJavaProjects`** — modules that are compiled and tested as part of the
+standard build.
+
+**`fineractPublishProjects`** — subset that is published to Maven Central /
+Apache Nexus during release.
+
+| Module | Purpose |
+|--------|---------|
+| `fineract-core` | Shared infrastructure: multi-tenancy, security context, domain base classes, batch framework |
+| `fineract-security` | Spring Security configuration, OAuth2, 2FA |
+| `fineract-cob` | Close-of-Business job framework and step registry |
+| `fineract-command` | Command pattern infrastructure (`CommandWrapper`, `PortfolioCommandSourceWritePlatformService`) |
+| `fineract-command-jdbc` | JDBC-backed command store |
+| `fineract-command-audit` | Audit trail for commands |
+| `fineract-accounting` | General ledger, journal entries, chart of accounts |
+| `fineract-provider` | Spring Boot application entry point, assembles all modules |
+| `fineract-loan` | Loan domain: products, accounts, transactions, schedule engine |
+| `fineract-savings` | Savings, fixed deposit, recurring deposit, shares, interoperability |
+| `fineract-investor` | External asset owners, loan securitisation |
+| `fineract-avro-schemas` | Apache Avro schema files and generated Java classes |
+| `fineract-client` | Official Java SDK (Retrofit 2) |
+| `fineract-client-feign` | OpenFeign alternative SDK |
+| `fineract-war` | WAR packaging of `fineract-provider` for servlet containers |
+| `integration-tests` | Full API integration tests against a running instance |
+| `twofactor-tests` | 2FA-specific integration tests |
+| `oauth2-tests` | OAuth2 integration tests |
+
+## Build Tooling
+
+### Develocity (Build Scans)
+
+`settings.gradle` configures the Develocity plugin for build analytics:
+
+```groovy
+plugins {
+    id 'com.gradle.develocity' version '3.18.2'
+    id 'com.gradle.common-custom-user-data-gradle-plugin' version '2.6.0'
+}
+
+develocity {
+    projectId = "fineract"
+    server = "https://develocity.apache.org"
+    buildScan {
+        uploadInBackground = !isCI
+        publishing.onlyIf { it.authenticated }
+        obfuscation {
+            ipAddresses { addresses -> addresses.collect { "0.0.0.0" } }
+        }
+    }
+}
+```
+
+Build scans are uploaded to `https://develocity.apache.org` only when the
+Gradle user is authenticated against the Apache Develocity instance. On CI
+(`JENKINS_URL` env var present) uploads are synchronous; locally they are
+background.
+
+### Local Build Cache
+
+```groovy
+buildCache {
+    local {
+        enabled = true
+    }
+}
+```
+
+The local build cache stores task outputs in `~/.gradle/caches/build-cache/`.
+Incremental builds reuse task outputs if inputs have not changed. For clean CI
+builds, disable with `--no-build-cache`.
+
+## Common Gradle Tasks
+
+```bash
+# Full build: compile, test, package
+./gradlew build
+
+# Compile and test without building archives
+./gradlew check
+
+# Run unit tests only
+./gradlew test
+
+# Build the Spring Boot executable JAR (fineract-provider)
+./gradlew :fineract-provider:bootJar
+
+# Build the WAR artifact
+./gradlew :fineract-war:war
+
+# Generate the Java SDK
+./gradlew :fineract-client:build
+
+# Generate Avro schema Java classes
+./gradlew :fineract-avro-schemas:build
+
+# Run integration tests (requires a running Fineract instance)
+./gradlew :integration-tests:test
+
+# Skip tests
+./gradlew build -x test
+```
+
+The Spring Boot JAR is produced at:
+```
+fineract-provider/build/libs/fineract-provider-*.jar
+```
+
+The WAR is at:
+```
+fineract-war/build/libs/fineract-provider-*.war
+```
+
+## `buildSrc/` — Cross-Module Build Logic
+
+The `buildSrc/` directory contains shared Gradle plugins applied to multiple
+modules. This is the standard Gradle pattern for centralising build logic:
+
+- Convention plugins for Java version and compiler flags
+- Dependency management / BOM imports
+- Checkstyle and formatting configuration
+- Static weaving configuration (`static-weaving.gradle`)
+
+Changes to `buildSrc/` invalidate the full build cache because they affect all
+module configurations.
+
+## Static Weaving
+
+Fineract uses EclipseLink JPA with static weaving for performance. The file
+`STATIC_WEAVING.md` at the repository root documents the setup. The
+`static-weaving.gradle` script in `buildSrc/` (or the module root) configures
+the weaving step as part of the compile lifecycle. This means the bytecode of
+JPA entities is modified at build time rather than at runtime, eliminating the
+need for a `java` agent.
+
+## Lombok
+
+Lombok is configured via `lombok.config` at the repository root:
+
+```ini
+# lombok.config (root)
+lombok.addLombokGeneratedAnnotation = true
+config.stopBubbling = true
+```
+
+All modules inherit this configuration. Lombok generates constructors
+(`@NoArgsConstructor`, `@RequiredArgsConstructor`, `@AllArgsConstructor`),
+accessors (`@Getter`, `@Setter`), and logging (`@Slf4j`) at compile time.
+The `@Conditional` annotations on investor beans (e.g. `@Slf4j`, `@RequiredArgsConstructor`)
+are Lombok-generated.
+
+## Custom Extension Pattern
+
+Teams that extend Fineract with proprietary modules place them under:
+
+```
+custom/<company>/<category>/<module>/
+```
+
+The `settings.gradle` includes a dynamic `includeAll` clause that discovers and
+includes any Gradle subproject under `custom/`. This allows custom modules to
+participate in the standard build without modifying the core `settings.gradle`.
+The corresponding Liquibase extension point is `db/custom-changelog` (see
+[DB Migrations](/deployment/database-migrations)).
+
+## WAR vs. Boot JAR
+
+| Artifact | Task | Use Case |
+|----------|------|----------|
+| `fineract-provider-*.jar` | `bootJar` | Docker containers, standalone execution via `java -jar` |
+| `fineract-provider-*.war` | `war` (in `fineract-war`) | Deployment to external servlet container (Tomcat, WildFly) |
+
+The Spring Boot JAR is self-contained with an embedded Tomcat. The WAR requires
+an external servlet container and must be placed in the `webapps/` directory of
+the container.
